@@ -2,7 +2,16 @@
  * Set a user's role to admin by email.
  * Use after the user exists in `users` (e.g. first Clerk sign-in).
  *
- * Usage: npm run db:promote-admin -- user@example.com
+ * Usage:
+ *   npm run db:promote-admin -- user@example.com
+ *
+ * Production (Neon): run once from your machine with the same DATABASE_URL as Render:
+ *   export DATABASE_URL='postgresql://...'   # from Neon dashboard
+ *   npm run db:promote-admin -- user@example.com
+ *
+ * Or run in Neon → SQL Editor:
+ *   UPDATE users SET role = 'admin', updated_at = CURRENT_TIMESTAMP
+ *   WHERE LOWER(email) = 'user@example.com';
  */
 
 import dotenv from 'dotenv';
