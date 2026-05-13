@@ -39,7 +39,11 @@ app.use(helmet());
 
 // CORS — FRONTEND_URL can be comma-separated; in development, any localhost / 127.0.0.1 port is allowed (Vite port shifts when 5173 is taken).
 const frontendUrlRaw = process.env.FRONTEND_URL || 'http://localhost:5173';
-const allowedOrigins = frontendUrlRaw.split(',').map((s) => s.trim()).filter(Boolean);
+const normalizeOrigin = (s: string) => s.replace(/\/$/, '');
+const allowedOrigins = frontendUrlRaw
+  .split(',')
+  .map((s) => normalizeOrigin(s.trim()))
+  .filter(Boolean);
 const isDev = process.env.NODE_ENV !== 'production';
 
 const corsOrigin: cors.CorsOptions['origin'] = (origin, callback) => {
@@ -47,7 +51,7 @@ const corsOrigin: cors.CorsOptions['origin'] = (origin, callback) => {
     callback(null, true);
     return;
   }
-  if (allowedOrigins.includes(origin)) {
+  if (allowedOrigins.includes(normalizeOrigin(origin))) {
     callback(null, true);
     return;
   }
