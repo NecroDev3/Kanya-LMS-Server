@@ -1,5 +1,5 @@
 import { Response, NextFunction } from 'express';
-import { queryOne, execute } from '../config/database.js';
+import { queryOne, execute, sqlNow } from '../config/database.js';
 import { AuthRequest, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 import multer from 'multer';
@@ -81,9 +81,9 @@ export async function getProfile(req: AuthRequest, res: Response, next: NextFunc
   try {
     const userId = req.user?.userId;
     if (!userId) throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-    const user = queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
+    const user = await queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
     if (!user) throw new AppError('User not found', 404, ErrorCodes.NOT_FOUND);
-    const profile = queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
+    const profile = await queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
     res.json({ success: true, data: buildProfileResponse(user, profile, getBaseUrl(req)) });
   } catch (error) { next(error); }
 }
@@ -92,9 +92,9 @@ export async function getProfile(req: AuthRequest, res: Response, next: NextFunc
 export async function getProfileById(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { userId } = req.params;
-    const user = queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
+    const user = await queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
     if (!user) throw new AppError('User not found', 404, ErrorCodes.NOT_FOUND);
-    const profile = queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
+    const profile = await queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
     res.json({ success: true, data: buildProfileResponse(user, profile, getBaseUrl(req)) });
   } catch (error) { next(error); }
 }
@@ -104,7 +104,7 @@ export async function patchProfile(req: AuthRequest, res: Response, next: NextFu
   try {
     const userId = req.user?.userId;
     if (!userId) throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-    const user = queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
+    const user = await queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
     if (!user) throw new AppError('User not found', 404, ErrorCodes.NOT_FOUND);
 
     const {
@@ -129,7 +129,7 @@ export async function patchProfile(req: AuthRequest, res: Response, next: NextFu
     }
     if (userUpdates.length > 0) {
       userParams.push(userId);
-      execute(`UPDATE users SET ${userUpdates.join(', ')}, updated_at = datetime('now') WHERE id = ?`, userParams);
+      await execute(`UPDATE users SET ${userUpdates.join(', ')}, updated_at = ${sqlNow()} WHERE id = ?`, userParams);
     }
 
     // Upsert user_profiles table
@@ -147,25 +147,25 @@ export async function patchProfile(req: AuthRequest, res: Response, next: NextFu
     }
 
     if (Object.keys(profileFields).length > 0) {
-      const existing = queryOne<{ user_id: string }>('SELECT user_id FROM user_profiles WHERE user_id = ?', [userId]);
+      const existing = await queryOne<{ user_id: string }>('SELECT user_id FROM user_profiles WHERE user_id = ?', [userId]);
       if (existing) {
         const setClauses = Object.keys(profileFields).map((k) => `${k} = ?`).join(', ');
-        execute(
-          `UPDATE user_profiles SET ${setClauses}, updated_at = datetime('now') WHERE user_id = ?`,
+        await execute(
+          `UPDATE user_profiles SET ${setClauses}, updated_at = ${sqlNow()} WHERE user_id = ?`,
           [...Object.values(profileFields), userId]
         );
       } else {
         const cols = ['user_id', ...Object.keys(profileFields)].join(', ');
         const placeholders = Array(Object.keys(profileFields).length + 1).fill('?').join(', ');
-        execute(
+        await execute(
           `INSERT INTO user_profiles (${cols}) VALUES (${placeholders})`,
           [userId, ...Object.values(profileFields)]
         );
       }
     }
 
-    const updatedUser = queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
-    const updatedProfile = queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
+    const updatedUser = await queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
+    const updatedProfile = await queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
     res.json({ success: true, data: buildProfileResponse(updatedUser!, updatedProfile, getBaseUrl(req)) });
   } catch (error) { next(error); }
 }
@@ -178,17 +178,17 @@ export async function uploadAvatar(req: AuthRequest, res: Response, next: NextFu
     if (!req.file) throw new AppError('No image file provided', 400, ErrorCodes.VALIDATION_ERROR);
 
     // Delete old avatar if any
-    const existing = queryOne<{ avatar_path: string | null }>('SELECT avatar_path FROM user_profiles WHERE user_id = ?', [userId]);
+    const existing = await queryOne<{ avatar_path: string | null }>('SELECT avatar_path FROM user_profiles WHERE user_id = ?', [userId]);
     if (existing?.avatar_path && fs.existsSync(existing.avatar_path)) {
       fs.unlink(existing.avatar_path, () => {});
     }
 
     const filePath = req.file.path;
-    const prevProfile = queryOne<{ user_id: string }>('SELECT user_id FROM user_profiles WHERE user_id = ?', [userId]);
+    const prevProfile = await queryOne<{ user_id: string }>('SELECT user_id FROM user_profiles WHERE user_id = ?', [userId]);
     if (prevProfile) {
-      execute('UPDATE user_profiles SET avatar_path = ?, updated_at = datetime(\'now\') WHERE user_id = ?', [filePath, userId]);
+      await execute(`UPDATE user_profiles SET avatar_path = ?, updated_at = ${sqlNow()} WHERE user_id = ?`, [filePath, userId]);
     } else {
-      execute('INSERT INTO user_profiles (user_id, avatar_path) VALUES (?, ?)', [userId, filePath]);
+      await execute('INSERT INTO user_profiles (user_id, avatar_path) VALUES (?, ?)', [userId, filePath]);
     }
 
     const avatarUrl = `${getBaseUrl(req)}/uploads/avatars/${path.basename(filePath)}`;

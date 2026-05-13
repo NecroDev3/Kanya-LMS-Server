@@ -10,7 +10,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { db, close } from '../config/database.js';
+import { assertSqliteForScript } from './sqliteOnly.js';
+import { close } from '../config/database.js';
+
+const db = assertSqliteForScript('db:seed-solana');
 import type { Course, CourseSection } from '../types/index.js';
 
 const ID = (s: string) => s;

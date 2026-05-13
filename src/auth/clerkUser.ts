@@ -1,12 +1,12 @@
 import { verifyToken, createClerkClient } from '@clerk/backend';
 import { v4 as uuidv4 } from 'uuid';
-import { queryOne, execute } from '../config/database.js';
+import { queryOne, execute, sqlNow } from '../config/database.js';
 import type { User, Student, JWTPayload } from '../types/index.js';
 
-function buildJwtPayload(user: User): JWTPayload {
+async function buildJwtPayload(user: User): Promise<JWTPayload> {
   let studentId: string | undefined;
   if (user.role === 'student') {
-    const student = queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [user.id]);
+    const student = await queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [user.id]);
     studentId = student?.id;
   }
   return {
@@ -48,7 +48,7 @@ export async function resolveUserFromClerkSessionToken(sessionToken: string): Pr
     return null;
   }
 
-  const linked = queryOne<User>('SELECT * FROM users WHERE clerk_user_id = ?', [sub]);
+  const linked = await queryOne<User>('SELECT * FROM users WHERE clerk_user_id = ?', [sub]);
   if (linked) {
     return buildJwtPayload(linked);
   }
@@ -73,24 +73,24 @@ export async function resolveUserFromClerkSessionToken(sessionToken: string): Pr
     email.split('@')[0] ||
     'User';
 
-  const byEmail = queryOne<User>('SELECT * FROM users WHERE email = ?', [email]);
+  const byEmail = await queryOne<User>('SELECT * FROM users WHERE email = ?', [email]);
   if (byEmail) {
-    execute("UPDATE users SET clerk_user_id = ?, updated_at = datetime('now') WHERE id = ?", [sub, byEmail.id]);
+    await execute(`UPDATE users SET clerk_user_id = ?, updated_at = ${sqlNow()} WHERE id = ?`, [sub, byEmail.id]);
     return buildJwtPayload(byEmail);
   }
 
   const id = uuidv4();
-  execute(
+  await execute(
     'INSERT INTO users (id, name, email, password_hash, role, clerk_user_id) VALUES (?, ?, ?, ?, ?, ?)',
     [id, name, email, '', 'student', sub]
   );
-  const user = queryOne<User>('SELECT * FROM users WHERE id = ?', [id]);
+  const user = await queryOne<User>('SELECT * FROM users WHERE id = ?', [id]);
   if (!user) return null;
 
   const slug = sub.replace(/[^a-zA-Z0-9]/g, '').slice(0, 24);
   const enrollmentNumber = `CLERK-${slug || id.replace(/-/g, '').slice(0, 16)}`;
   const studentId = uuidv4();
-  execute(
+  await execute(
     `INSERT INTO students (id, user_id, name, email, enrollment_number, department, semester)
      VALUES (?, ?, ?, ?, ?, 'General', 1)`,
     [studentId, id, name, email, enrollmentNumber]

@@ -5,19 +5,19 @@ import { AuthRequest, DashboardAnalytics, SubmissionStatus } from '../types/inde
 export async function getDashboard(_req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     // Get total students
-    const studentsCount = queryOne<{ count: number }>(
+    const studentsCount = await queryOne<{ count: number }>(
       'SELECT COUNT(*) as count FROM students'
     );
-    const totalStudents = studentsCount?.count || 0;
+    const totalStudents = Number(studentsCount?.count) || 0;
 
     // Get total submissions
-    const submissionsCount = queryOne<{ count: number }>(
+    const submissionsCount = await queryOne<{ count: number }>(
       'SELECT COUNT(*) as count FROM submissions'
     );
-    const totalSubmissions = submissionsCount?.count || 0;
+    const totalSubmissions = Number(submissionsCount?.count) || 0;
 
     // Get submissions by status
-    const statusCounts = query<{ status: SubmissionStatus; count: number }>(
+    const statusCounts = await query<{ status: SubmissionStatus; count: number }>(
       `SELECT status, COUNT(*) as count FROM submissions GROUP BY status`
     );
 
@@ -28,21 +28,21 @@ export async function getDashboard(_req: AuthRequest, res: Response, next: NextF
     };
 
     for (const row of statusCounts) {
-      submissionsByStatus[row.status] = row.count;
+      submissionsByStatus[row.status] = Number(row.count);
     }
 
     // Get students by department
-    const departmentCounts = query<{ department: string; count: number }>(
+    const departmentCounts = await query<{ department: string; count: number }>(
       `SELECT department, COUNT(*) as count FROM students GROUP BY department ORDER BY count DESC`
     );
 
     const studentsByDepartment = departmentCounts.map(row => ({
       department: row.department,
-      count: row.count,
+      count: Number(row.count),
     }));
 
     // Get recent submissions (last 10)
-    const recentSubmissions = query<{ 
+    const recentSubmissions = await query<{ 
       id: string; 
       title: string; 
       status: SubmissionStatus; 

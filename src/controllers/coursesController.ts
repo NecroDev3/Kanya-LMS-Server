@@ -13,8 +13,8 @@ interface CourseRow {
   sections: string;
 }
 
-function getUserCourseCodes(userId: string): string[] {
-  const rows = query<{ course_code: string }>(
+async function getUserCourseCodes(userId: string): Promise<string[]> {
+  const rows = await query<{ course_code: string }>(
     'SELECT course_code FROM user_course_codes WHERE user_id = ?',
     [userId]
   );
@@ -58,18 +58,18 @@ export async function getCourses(req: AuthRequest, res: Response, next: NextFunc
     const isAdmin = req.user?.role === 'admin';
     let rows: CourseRow[];
     if (isAdmin) {
-      rows = query<CourseRow>('SELECT id, title, description, course_code, sections FROM courses ORDER BY title');
+      rows = await query<CourseRow>('SELECT id, title, description, course_code, sections FROM courses ORDER BY title');
     } else {
       const userId = req.user?.userId;
       if (!userId) {
         throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
       }
-      const codes = getUserCourseCodes(userId);
+      const codes = await getUserCourseCodes(userId);
       if (codes.length === 0) {
         rows = [];
       } else {
         const placeholders = codes.map(() => '?').join(',');
-        rows = query<CourseRow>(
+        rows = await query<CourseRow>(
           `SELECT id, title, description, course_code, sections FROM courses WHERE course_code IN (${placeholders}) ORDER BY title`,
           codes
         );
@@ -92,12 +92,12 @@ export async function getCourse(req: AuthRequest, res: Response, next: NextFunct
     const { id } = req.params;
     const userId = req.user?.userId;
     const isAdmin = req.user?.role === 'admin';
-    const row = queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
+    const row = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
     if (!row) {
       throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
     }
     if (!isAdmin && userId) {
-      const codes = getUserCourseCodes(userId);
+      const codes = await getUserCourseCodes(userId);
       if (!codes.includes(row.course_code)) {
         throw new AppError('You do not have access to this course', 403, ErrorCodes.FORBIDDEN);
       }
@@ -158,21 +158,21 @@ export async function createCourse(req: AuthRequest, res: Response, next: NextFu
       throw new AppError('Validation failed', 400, ErrorCodes.VALIDATION_ERROR, errors);
     }
 
-    const existing = queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [course.id]);
+    const existing = await queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [course.id]);
     if (existing) {
       throw new AppError('A course with this id already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
     }
-    const codeExists = queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ?', [course.courseCode]);
+    const codeExists = await queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ?', [course.courseCode]);
     if (codeExists) {
       throw new AppError('A course with this courseCode already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
     }
 
-    execute(
+    await execute(
       'INSERT INTO courses (id, title, description, course_code, sections) VALUES (?, ?, ?, ?, ?)',
       [course.id, course.title, course.description ?? null, course.courseCode, JSON.stringify(course.sections)]
     );
 
-    const row = queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [course.id]);
+    const row = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [course.id]);
     if (!row) {
       throw new AppError('Failed to create course', 500, ErrorCodes.INTERNAL_ERROR);
     }
@@ -189,7 +189,7 @@ export async function createCourse(req: AuthRequest, res: Response, next: NextFu
 export async function updateCourse(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    const existing = queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
+    const existing = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
     if (!existing) {
       throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
     }
@@ -219,14 +219,14 @@ export async function updateCourse(req: AuthRequest, res: Response, next: NextFu
     let courseCode = existing.course_code;
     if (o.courseCode !== undefined) {
       courseCode = normalizeCourseCode(String(o.courseCode));
-      const codeExists = queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ? AND id != ?', [courseCode, id]);
+      const codeExists = await queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ? AND id != ?', [courseCode, id]);
       if (codeExists) {
         throw new AppError('A course with this courseCode already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
       }
     }
     const sections = o.sections !== undefined ? (o.sections as CourseSection[]) : parseSections(existing.sections);
 
-    execute('UPDATE courses SET title = ?, description = ?, course_code = ?, sections = ? WHERE id = ?', [
+    await execute('UPDATE courses SET title = ?, description = ?, course_code = ?, sections = ? WHERE id = ?', [
       title,
       description ?? null,
       courseCode,
@@ -234,7 +234,7 @@ export async function updateCourse(req: AuthRequest, res: Response, next: NextFu
       id,
     ]);
 
-    const row = queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
+    const row = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
     res.json({
       success: true,
       data: rowToCourse(row!),
@@ -247,11 +247,11 @@ export async function updateCourse(req: AuthRequest, res: Response, next: NextFu
 export async function deleteCourse(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    const existing = queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [id]);
+    const existing = await queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [id]);
     if (!existing) {
       throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
     }
-    execute('DELETE FROM courses WHERE id = ?', [id]);
+    await execute('DELETE FROM courses WHERE id = ?', [id]);
     res.json({ success: true });
   } catch (error) {
     next(error);
@@ -260,11 +260,11 @@ export async function deleteCourse(req: AuthRequest, res: Response, next: NextFu
 
 // --- Course members (Course members & user directory API) ---
 
-function assertCanAccessCourse(courseId: string, userId: string, isAdmin: boolean): boolean {
+async function assertCanAccessCourse(courseId: string, userId: string, isAdmin: boolean): Promise<boolean> {
   if (isAdmin) return true;
-  const course = queryOne<{ course_code: string }>('SELECT course_code FROM courses WHERE id = ?', [courseId]);
+  const course = await queryOne<{ course_code: string }>('SELECT course_code FROM courses WHERE id = ?', [courseId]);
   if (!course) return false;
-  const hasCode = queryOne<{ user_id: string }>(
+  const hasCode = await queryOne<{ user_id: string }>(
     'SELECT user_id FROM user_course_codes WHERE user_id = ? AND course_code = ?',
     [userId, course.course_code]
   );
@@ -280,15 +280,15 @@ export async function getCourseMembers(req: AuthRequest, res: Response, next: Ne
     }
 
     const { id: courseId } = req.params;
-    const course = queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
+    const course = await queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
     if (!course) {
       throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
     }
-    if (!assertCanAccessCourse(courseId, userId, isAdmin)) {
+    if (!(await assertCanAccessCourse(courseId, userId, isAdmin))) {
       throw new AppError('You do not have access to this course', 403, ErrorCodes.FORBIDDEN);
     }
 
-    const rows = query<{ id: string; name: string; email: string; role: string }>(
+    const rows = await query<{ id: string; name: string; email: string; role: string }>(
       `SELECT u.id, u.name, u.email, u.role
        FROM users u
        INNER JOIN user_course_codes c ON c.user_id = u.id
@@ -317,26 +317,26 @@ export async function addCourseMember(req: AuthRequest, res: Response, next: Nex
     const { id: courseId } = req.params;
     const { userId: rawUserId } = req.body;
 
-    const course = queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
+    const course = await queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
     if (!course) {
       throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
     }
 
     // Resolve user: try users table first, then students table (frontend may send student.id)
     let targetUserId = rawUserId;
-    let user = queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
+    let user = await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
     if (!user) {
-      const student = queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
+      const student = await queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
       if (student?.user_id) {
         targetUserId = student.user_id;
-        user = queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
+        user = await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
       }
     }
     if (!user) {
       throw new AppError('User not found', 404, ErrorCodes.NOT_FOUND);
     }
 
-    const existing = queryOne<{ user_id: string }>(
+    const existing = await queryOne<{ user_id: string }>(
       'SELECT user_id FROM user_course_codes WHERE user_id = ? AND course_code = ?',
       [targetUserId, course.course_code]
     );
@@ -345,9 +345,9 @@ export async function addCourseMember(req: AuthRequest, res: Response, next: Nex
       return;
     }
 
-    execute('INSERT INTO user_course_codes (user_id, course_code) VALUES (?, ?)', [targetUserId, course.course_code]);
+    await execute('INSERT INTO user_course_codes (user_id, course_code) VALUES (?, ?)', [targetUserId, course.course_code]);
 
-    const rows = query<{ id: string; name: string; email: string; role: string }>(
+    const rows = await query<{ id: string; name: string; email: string; role: string }>(
       `SELECT u.id, u.name, u.email, u.role
        FROM users u
        INNER JOIN user_course_codes c ON c.user_id = u.id
@@ -375,19 +375,19 @@ export async function removeCourseMember(req: AuthRequest, res: Response, next: 
   try {
     const { id: courseId, userId: rawUserId } = req.params;
 
-    const course = queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
+    const course = await queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
     if (!course) {
       throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
     }
 
     // Resolve: frontend may send student.id instead of users.id
     let targetUserId = rawUserId;
-    if (!queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId])) {
-      const student = queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
+    if (!await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId])) {
+      const student = await queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
       if (student?.user_id) targetUserId = student.user_id;
     }
 
-    const deleted = execute(
+    const deleted = await execute(
       'DELETE FROM user_course_codes WHERE user_id = ? AND course_code = ?',
       [targetUserId, course.course_code]
     );

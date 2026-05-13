@@ -5,7 +5,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { db, close } from '../config/database.js';
+import { assertSqliteForScript } from './sqliteOnly.js';
+import { close } from '../config/database.js';
+
+const db = assertSqliteForScript('db:migrate-clerk');
 
 function columnExists(table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];

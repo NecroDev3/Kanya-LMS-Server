@@ -1,29 +1,61 @@
-import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
+import pg from 'pg';
+import Database, { type Database as DatabaseType } from 'better-sqlite3';
 
 dotenv.config();
 
-const DB_PATH = process.env.DATABASE_PATH || './data/student_ms.db';
+const databaseUrl = process.env.DATABASE_URL?.trim();
 
-// Ensure directory exists
-import fs from 'fs';
-const dbDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+export const isPostgres = Boolean(databaseUrl);
+
+/** Use in dynamic SQL fragments, e.g. \`updated_at = ${sqlNow()}\` */
+export function sqlNow(): string {
+  return isPostgres ? 'CURRENT_TIMESTAMP' : "datetime('now')";
 }
 
-export let db: DatabaseType = new Database(DB_PATH);
+/** Case-insensitive search on Postgres */
+export function sqlLike(): string {
+  return isPostgres ? 'ILIKE' : 'LIKE';
+}
 
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+/** Convert SQLite-style ? placeholders to $1 $2 ... for pg */
+export function toPgSql(sql: string): string {
+  let n = 0;
+  return sql.replace(/\?/g, () => `$${++n}`);
+}
 
-// Ensure user_course_codes exists (for DBs created before course-code access was added)
-function ensureCourseCodeTables(): void {
-  const hasTable = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='user_course_codes'")
-    .get();
-  if (!hasTable) {
+let pool: pg.Pool | null = null;
+let sqliteDb: DatabaseType | null = null;
+
+if (isPostgres) {
+  pool = new pg.Pool({
+    connectionString: databaseUrl,
+    max: 10,
+    ssl: databaseUrl!.includes('neon.tech') || /sslmode=require/i.test(databaseUrl!)
+      ? { rejectUnauthorized: false }
+      : undefined,
+  });
+} else {
+  const DB_PATH = process.env.DATABASE_PATH || './data/student_ms.db';
+  const dbDir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+  sqliteDb = new Database(DB_PATH);
+  sqliteDb.pragma('journal_mode = WAL');
+  sqliteDb.pragma('foreign_keys = ON');
+  runSqliteEnsures(sqliteDb);
+}
+
+function runSqliteEnsures(db: DatabaseType): void {
+  const hasTable = (name: string) =>
+    Boolean(
+      db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name)
+    );
+
+  if (!hasTable('user_course_codes')) {
     db.exec(`
       CREATE TABLE user_course_codes (
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -34,30 +66,18 @@ function ensureCourseCodeTables(): void {
       CREATE INDEX IF NOT EXISTS idx_user_course_codes_code ON user_course_codes(course_code);
     `);
   }
-}
-ensureCourseCodeTables();
 
-function ensureClerkUserIdColumn(): void {
-  const hasUsers = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    .get();
-  if (!hasUsers) return;
-
-  const cols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
-  if (!cols.some((c) => c.name === 'clerk_user_id')) {
-    db.exec('ALTER TABLE users ADD COLUMN clerk_user_id TEXT');
+  if (hasTable('users')) {
+    const cols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'clerk_user_id')) {
+      db.exec('ALTER TABLE users ADD COLUMN clerk_user_id TEXT');
+    }
+    db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_clerk_user_id ON users(clerk_user_id) WHERE clerk_user_id IS NOT NULL'
+    );
   }
-  db.exec(
-    'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_clerk_user_id ON users(clerk_user_id) WHERE clerk_user_id IS NOT NULL'
-  );
-}
-ensureClerkUserIdColumn();
 
-function ensureAnnouncementsTable(): void {
-  const has = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='announcements'")
-    .get();
-  if (!has) {
+  if (!hasTable('announcements')) {
     db.exec(`
       CREATE TABLE announcements (
         id         TEXT PRIMARY KEY,
@@ -75,14 +95,8 @@ function ensureAnnouncementsTable(): void {
       CREATE INDEX IF NOT EXISTS idx_announcements_created  ON announcements(created_at DESC);
     `);
   }
-}
-ensureAnnouncementsTable();
 
-function ensureUserProfilesTable(): void {
-  const has = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='user_profiles'")
-    .get();
-  if (!has) {
+  if (!hasTable('user_profiles')) {
     db.exec(`
       CREATE TABLE user_profiles (
         user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -113,14 +127,8 @@ function ensureUserProfilesTable(): void {
     addCol('website_url', 'TEXT');
     addCol('custom_links', "TEXT DEFAULT '[]'");
   }
-}
-ensureUserProfilesTable();
 
-function ensureCourseInvitesTable(): void {
-  const has = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='course_invites'")
-    .get();
-  if (!has) {
+  if (!hasTable('course_invites')) {
     db.exec(`
       CREATE TABLE course_invites (
         id TEXT PRIMARY KEY,
@@ -136,14 +144,8 @@ function ensureCourseInvitesTable(): void {
       CREATE INDEX IF NOT EXISTS idx_course_invites_token ON course_invites(token);
     `);
   }
-}
-ensureCourseInvitesTable();
 
-function ensureConversationReadsTable(): void {
-  const has = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_reads'")
-    .get();
-  if (!has) {
+  if (!hasTable('conversation_reads')) {
     db.exec(`
       CREATE TABLE conversation_reads (
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -154,59 +156,112 @@ function ensureConversationReadsTable(): void {
       CREATE INDEX IF NOT EXISTS idx_conv_reads_user ON conversation_reads(user_id);
     `);
   }
-}
-ensureConversationReadsTable();
 
-function ensureForumTopicCourseIdColumn(): void {
-  const has = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='forum_topics'").get();
-  if (!has) return;
-  const cols = db.prepare('PRAGMA table_info(forum_topics)').all() as { name: string }[];
-  if (!cols.some((c) => c.name === 'course_id')) {
-    db.exec('ALTER TABLE forum_topics ADD COLUMN course_id TEXT NULL REFERENCES courses(id) ON DELETE SET NULL');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_forum_topics_course_id ON forum_topics(course_id)');
+  if (hasTable('forum_topics')) {
+    const cols = db.prepare('PRAGMA table_info(forum_topics)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'course_id')) {
+      db.exec('ALTER TABLE forum_topics ADD COLUMN course_id TEXT NULL REFERENCES courses(id) ON DELETE SET NULL');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_forum_topics_course_id ON forum_topics(course_id)');
+    }
+  }
+
+  if (hasTable('quizzes')) {
+    const cols = db.prepare('PRAGMA table_info(quizzes)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'information')) {
+      db.exec('ALTER TABLE quizzes ADD COLUMN information TEXT');
+    }
   }
 }
-ensureForumTopicCourseIdColumn();
 
-function ensureQuizInformationColumn(): void {
-  const has = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='quizzes'").get();
-  if (!has) return;
-  const cols = db.prepare('PRAGMA table_info(quizzes)').all() as { name: string }[];
-  if (!cols.some((c) => c.name === 'information')) {
-    db.exec('ALTER TABLE quizzes ADD COLUMN information TEXT');
+/** Only set when using SQLite (e.g. tests, local without DATABASE_URL). Reassigned by _resetForTests. */
+export let db: DatabaseType | null = sqliteDb;
+
+export async function query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  if (isPostgres) {
+    const { rows } = await pool!.query(toPgSql(sql), params);
+    return rows as T[];
   }
-}
-ensureQuizInformationColumn();
-
-export function query<T>(sql: string, params: unknown[] = []): T[] {
-  const stmt = db.prepare(sql);
+  const stmt = sqliteDb!.prepare(sql);
   return stmt.all(...params) as T[];
 }
 
-export function queryOne<T>(sql: string, params: unknown[] = []): T | null {
-  const stmt = db.prepare(sql);
-  return (stmt.get(...params) as T) || null;
+export async function queryOne<T>(sql: string, params: unknown[] = []): Promise<T | null> {
+  if (isPostgres) {
+    const { rows } = await pool!.query(toPgSql(sql), params);
+    return (rows[0] as T) ?? null;
+  }
+  const stmt = sqliteDb!.prepare(sql);
+  const row = stmt.get(...params) as T | undefined;
+  return row ?? null;
 }
 
-export function execute(sql: string, params: unknown[] = []): number {
-  const stmt = db.prepare(sql);
-  const result = stmt.run(...params);
-  return result.changes;
+export async function execute(sql: string, params: unknown[] = []): Promise<number> {
+  if (isPostgres) {
+    const result = await pool!.query(toPgSql(sql), params);
+    return result.rowCount ?? 0;
+  }
+  const stmt = sqliteDb!.prepare(sql);
+  const r = stmt.run(...params);
+  return r.changes;
 }
 
-export function insert(sql: string, params: unknown[] = []): string | number {
-  const stmt = db.prepare(sql);
+export async function insert(sql: string, params: unknown[] = []): Promise<string | number> {
+  if (isPostgres) {
+    const r = await pool!.query(toPgSql(sql), params);
+    return r.rowCount ?? 0;
+  }
+  const stmt = sqliteDb!.prepare(sql);
   const result = stmt.run(...params);
   return Number(result.lastInsertRowid);
 }
 
-export function close(): void {
-  db.close();
+/** Idempotent user_course_codes row (Postgres: ON CONFLICT DO NOTHING). */
+export async function insertUserCourseCodeIgnore(userId: string, courseCode: string): Promise<void> {
+  if (isPostgres) {
+    await execute(
+      `INSERT INTO user_course_codes (user_id, course_code) VALUES (?, ?) ON CONFLICT (user_id, course_code) DO NOTHING`,
+      [userId, courseCode]
+    );
+  } else {
+    await execute(`INSERT OR IGNORE INTO user_course_codes (user_id, course_code) VALUES (?, ?)`, [
+      userId,
+      courseCode,
+    ]);
+  }
+}
+
+export async function testConnection(): Promise<void> {
+  if (isPostgres) {
+    await pool!.query('SELECT 1');
+  } else {
+    sqliteDb!.prepare('SELECT 1').get();
+  }
+}
+
+export async function close(): Promise<void> {
+  if (isPostgres) {
+    await pool!.end();
+  } else {
+    try {
+      sqliteDb?.close();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function _resetForTests(schemaSQL: string): void {
-  try { db.close(); } catch { /* already closed */ }
-  db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(schemaSQL);
+  if (isPostgres) {
+    throw new Error('_resetForTests requires SQLite (unset DATABASE_URL in tests)');
+  }
+  try {
+    sqliteDb?.close();
+  } catch {
+    /* ignore */
+  }
+  sqliteDb = new Database(':memory:');
+  sqliteDb.pragma('foreign_keys = ON');
+  sqliteDb.exec(schemaSQL);
+  runSqliteEnsures(sqliteDb);
+  db = sqliteDb;
 }

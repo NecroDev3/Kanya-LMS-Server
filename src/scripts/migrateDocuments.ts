@@ -1,7 +1,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { db, close } from '../config/database.js';
+import { assertSqliteForScript } from './sqliteOnly.js';
+import { close } from '../config/database.js';
+
+const db = assertSqliteForScript('db:migrate');
 
 const migrationSQL = `
 -- Course Documents table

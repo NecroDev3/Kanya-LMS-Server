@@ -9,9 +9,9 @@ import { AppError } from '../middleware/errorHandler.js';
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-function getUserCourseCodes(userId: string): string[] {
+async function getUserCourseCodes(userId: string): Promise<string[]> {
   try {
-    const rows = query<{ course_code: string }>(
+    const rows = await query<{ course_code: string }>(
       'SELECT course_code FROM user_course_codes WHERE user_id = ? ORDER BY course_code',
       [userId]
     );
@@ -19,6 +19,7 @@ function getUserCourseCodes(userId: string): string[] {
   } catch (e: unknown) {
     const err = e as { code?: string; message?: string };
     if (err?.code === 'SQLITE_ERROR' && err?.message?.includes('user_course_codes')) return [];
+    if (err?.code === '42P01' && err?.message?.includes('user_course_codes')) return [];
     throw e;
   }
 }
@@ -33,7 +34,7 @@ export async function login(req: AuthRequest, res: Response, next: NextFunction)
     }
 
     // Find user by email
-    const user = queryOne<User>(
+    const user = await queryOne<User>(
       'SELECT * FROM users WHERE email = ?',
       [email.toLowerCase()]
     );
@@ -51,7 +52,7 @@ export async function login(req: AuthRequest, res: Response, next: NextFunction)
     // Get studentId if user is a student
     let studentId: string | undefined;
     if (user.role === 'student') {
-      const student = queryOne<Student>(
+      const student = await queryOne<Student>(
         'SELECT id FROM students WHERE user_id = ?',
         [user.id]
       );
@@ -75,7 +76,7 @@ export async function login(req: AuthRequest, res: Response, next: NextFunction)
           name: user.name,
           email: user.email,
           role: user.role,
-          courseCodes: getUserCourseCodes(user.id),
+          courseCodes: await getUserCourseCodes(user.id),
         },
       },
     });
@@ -108,14 +109,14 @@ export async function googleLogin(req: AuthRequest, res: Response, next: NextFun
     const email = payload.email.toLowerCase();
     const name = (payload.name || payload.email.split('@')[0] || 'User').trim();
 
-    let user = queryOne<User>('SELECT * FROM users WHERE email = ?', [email]);
+    let user = await queryOne<User>('SELECT * FROM users WHERE email = ?', [email]);
     if (!user) {
       const id = uuidv4();
-      execute(
+      await execute(
         'INSERT INTO users (id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)',
         [id, name, email, '', 'student']
       );
-      user = queryOne<User>('SELECT * FROM users WHERE id = ?', [id]);
+      user = await queryOne<User>('SELECT * FROM users WHERE id = ?', [id]);
     }
 
     if (!user) {
@@ -124,7 +125,7 @@ export async function googleLogin(req: AuthRequest, res: Response, next: NextFun
 
     let studentId: string | undefined;
     if (user.role === 'student') {
-      const student = queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [user.id]);
+      const student = await queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [user.id]);
       studentId = student?.id;
     }
 
@@ -144,7 +145,7 @@ export async function googleLogin(req: AuthRequest, res: Response, next: NextFun
           name: user.name,
           email: user.email,
           role: user.role,
-          courseCodes: getUserCourseCodes(user.id),
+          courseCodes: await getUserCourseCodes(user.id),
         },
       },
     });
@@ -167,7 +168,7 @@ export async function getMe(req: AuthRequest, res: Response, next: NextFunction)
       throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
     }
 
-    const user = queryOne<User>(
+    const user = await queryOne<User>(
       'SELECT id, name, email, role FROM users WHERE id = ?',
       [req.user.userId]
     );
@@ -183,7 +184,7 @@ export async function getMe(req: AuthRequest, res: Response, next: NextFunction)
         name: user.name,
         email: user.email,
         role: user.role,
-        courseCodes: getUserCourseCodes(user.id),
+        courseCodes: await getUserCourseCodes(user.id),
       },
     });
   } catch (error) {
@@ -193,18 +194,20 @@ export async function getMe(req: AuthRequest, res: Response, next: NextFunction)
 
 // Helper function to create a user (for seeding/registration)
 export async function createUser(
-  name: string, 
-  email: string, 
-  password: string, 
+  name: string,
+  email: string,
+  password: string,
   role: 'student' | 'admin'
 ): Promise<User> {
   const id = uuidv4();
   const passwordHash = await bcrypt.hash(password, 10);
-  
-  const stmt = `INSERT INTO users (id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)`;
-  query(stmt, [id, name, email.toLowerCase(), passwordHash, role]);
 
-  const user = queryOne<User>('SELECT * FROM users WHERE id = ?', [id]);
+  await execute(
+    `INSERT INTO users (id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)`,
+    [id, name, email.toLowerCase(), passwordHash, role]
+  );
+
+  const user = await queryOne<User>('SELECT * FROM users WHERE id = ?', [id]);
   if (!user) {
     throw new Error('Failed to create user');
   }

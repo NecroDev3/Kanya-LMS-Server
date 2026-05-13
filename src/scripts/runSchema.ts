@@ -1,11 +1,11 @@
 /**
- * Run the LMS schema once against the server DB.
- * Uses the same DB path as src/config/database.ts (default: ./data/student_ms.db).
+ * Apply DB schema.
+ * - SQLite (local default): database/schema.sql
+ * - Neon / Postgres: set DATABASE_URL; uses database/schema.postgres.sql
  *
  * Usage:
  *   npm run db:schema
- *   # Or with custom schema path:
- *   SCHEMA_SQL_PATH=/path/to/schema.sql npm run db:schema
+ *   SCHEMA_SQL_PATH=/path/to/file.sql npm run db:schema
  */
 
 import dotenv from 'dotenv';
@@ -13,29 +13,77 @@ dotenv.config();
 
 import fs from 'fs';
 import path from 'path';
-import { db, close } from '../config/database.js';
+import pg from 'pg';
 
-// Prefer schema in this repo; override with SCHEMA_SQL_PATH if using external repo
-const DEFAULT_SCHEMA_PATH = path.join(process.cwd(), 'database/schema.sql');
-const SCHEMA_PATH = process.env.SCHEMA_SQL_PATH || DEFAULT_SCHEMA_PATH;
+function splitSqlStatements(raw: string): string[] {
+  return raw
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
-function runSchema() {
-  try {
-    if (!fs.existsSync(SCHEMA_PATH)) {
-      console.error(`Schema file not found: ${SCHEMA_PATH}`);
-      console.error('Set SCHEMA_SQL_PATH or place the schema at the path above.');
-      process.exit(1);
-    }
-    const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
-    console.log('Running schema from', SCHEMA_PATH);
-    db.exec(schema);
-    console.log('Schema applied successfully.');
-  } catch (err) {
-    console.error('Error running schema:', err);
+function pgPool(): pg.Pool {
+  const connectionString = process.env.DATABASE_URL!.trim();
+  return new pg.Pool({
+    connectionString,
+    max: 2,
+    ssl:
+      connectionString.includes('neon.tech') || /sslmode=require/i.test(connectionString)
+        ? { rejectUnauthorized: false }
+        : undefined,
+  });
+}
+
+async function runPostgresSchema(): Promise<void> {
+  const defaultPath = path.join(process.cwd(), 'database/schema.postgres.sql');
+  const schemaPath = process.env.SCHEMA_SQL_PATH || defaultPath;
+  if (!fs.existsSync(schemaPath)) {
+    console.error(`Schema file not found: ${schemaPath}`);
     process.exit(1);
+  }
+  const body = fs.readFileSync(schemaPath, 'utf8');
+  const pool = pgPool();
+  try {
+    console.log('Running Postgres schema from', schemaPath);
+    for (const stmt of splitSqlStatements(body)) {
+      await pool.query(stmt);
+    }
+    console.log('Postgres schema applied successfully.');
   } finally {
-    close();
+    await pool.end();
   }
 }
 
-runSchema();
+async function runSqliteSchema(): Promise<void> {
+  const { db, close } = await import('../config/database.js');
+  if (!db) {
+    console.error('SQLite mode expected but db is null.');
+    process.exit(1);
+  }
+  const defaultPath = path.join(process.cwd(), 'database/schema.sql');
+  const schemaPath = process.env.SCHEMA_SQL_PATH || defaultPath;
+  if (!fs.existsSync(schemaPath)) {
+    console.error(`Schema file not found: ${schemaPath}`);
+    process.exit(1);
+  }
+  const schema = fs.readFileSync(schemaPath, 'utf8');
+  console.log('Running SQLite schema from', schemaPath);
+  db.exec(schema);
+  console.log('SQLite schema applied successfully.');
+  await close();
+}
+
+async function main(): Promise<void> {
+  try {
+    if (process.env.DATABASE_URL?.trim()) {
+      await runPostgresSchema();
+    } else {
+      await runSqliteSchema();
+    }
+  } catch (err) {
+    console.error('Error running schema:', err);
+    process.exit(1);
+  }
+}
+
+void main();

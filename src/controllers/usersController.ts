@@ -3,8 +3,8 @@ import { query, queryOne, execute } from '../config/database.js';
 import { AuthRequest, UserDirectoryItem, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 
-function getUserCourseCodes(userId: string): string[] {
-  const rows = query<{ course_code: string }>(
+async function getUserCourseCodes(userId: string): Promise<string[]> {
+  const rows = await query<{ course_code: string }>(
     'SELECT course_code FROM user_course_codes WHERE user_id = ? ORDER BY course_code',
     [userId]
   );
@@ -18,13 +18,15 @@ export async function getMyCourses(req: AuthRequest, res: Response, next: NextFu
       throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
     }
 
-    const codes = getUserCourseCodes(userId);
-    const courseIds = codes.length === 0
-      ? []
-      : query<{ id: string }>(
-          `SELECT id FROM courses WHERE course_code IN (${codes.map(() => '?').join(',')}) ORDER BY title`,
-          codes
-        ).map((r) => r.id);
+    const codes = await getUserCourseCodes(userId);
+    let courseIds: string[] = [];
+    if (codes.length > 0) {
+      const idRows = await query<{ id: string }>(
+        `SELECT id FROM courses WHERE course_code IN (${codes.map(() => '?').join(',')}) ORDER BY title`,
+        codes
+      );
+      courseIds = idRows.map((r) => r.id);
+    }
 
     res.json({
       success: true,
@@ -38,7 +40,7 @@ export async function getMyCourses(req: AuthRequest, res: Response, next: NextFu
 export async function getUser(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    const row = queryOne<{ id: string; name: string; email: string; role: string }>(
+    const row = await queryOne<{ id: string; name: string; email: string; role: string }>(
       'SELECT id, name, email, role FROM users WHERE id = ?',
       [id]
     );
@@ -64,16 +66,18 @@ export async function getUser(req: AuthRequest, res: Response, next: NextFunctio
 
 export async function getUsers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const rows = query<{ id: string; name: string; email: string; role: string }>(
+    const rows = await query<{ id: string; name: string; email: string; role: string }>(
       'SELECT id, name, email, role FROM users ORDER BY name'
     );
-    const users: UserDirectoryItem[] = rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      email: r.email,
-      role: r.role as UserDirectoryItem['role'],
-      courseCodes: getUserCourseCodes(r.id),
-    }));
+    const users: UserDirectoryItem[] = await Promise.all(
+      rows.map(async (r) => ({
+        id: r.id,
+        name: r.name,
+        email: r.email,
+        role: r.role as UserDirectoryItem['role'],
+        courseCodes: await getUserCourseCodes(r.id),
+      }))
+    );
 
     res.json({
       success: true,
@@ -90,12 +94,12 @@ export async function patchUser(req: AuthRequest, res: Response, next: NextFunct
     const { courseCodes } = req.body ?? {};
 
     // Resolve: frontend may send student.id instead of users.id
-    let user = queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
+    let user = await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
     if (!user) {
-      const student = queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
+      const student = await queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
       if (student?.user_id) {
         targetUserId = student.user_id;
-        user = queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
+        user = await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
       }
     }
     if (!user) {
@@ -103,7 +107,7 @@ export async function patchUser(req: AuthRequest, res: Response, next: NextFunct
     }
 
     if (courseCodes === undefined) {
-      const current = getUserCourseCodes(targetUserId);
+      const current = await getUserCourseCodes(targetUserId);
       res.json({
         success: true,
         data: { id: targetUserId, courseCodes: current },
@@ -119,15 +123,15 @@ export async function patchUser(req: AuthRequest, res: Response, next: NextFunct
     const unique = [...new Set(normalized)];
 
     for (const code of unique) {
-      const exists = queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ?', [code]);
+      const exists = await queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ?', [code]);
       if (!exists) {
         throw new AppError(`Course code "${code}" does not exist`, 400, ErrorCodes.VALIDATION_ERROR);
       }
     }
 
-    execute('DELETE FROM user_course_codes WHERE user_id = ?', [targetUserId]);
+    await execute('DELETE FROM user_course_codes WHERE user_id = ?', [targetUserId]);
     for (const code of unique) {
-      execute('INSERT INTO user_course_codes (user_id, course_code) VALUES (?, ?)', [targetUserId, code]);
+      await execute('INSERT INTO user_course_codes (user_id, course_code) VALUES (?, ?)', [targetUserId, code]);
     }
 
     res.json({

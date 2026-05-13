@@ -14,8 +14,10 @@ dotenv.config();
 
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { db, close } from '../config/database.js';
+import { assertSqliteForScript } from './sqliteOnly.js';
+import { close } from '../config/database.js';
 
+const db = assertSqliteForScript('db:seed');
 const STUDENT_EMAIL = 'student@smwebsystems.com';
 const USERS = [
   { name: 'Admin', email: 'admin@smwebsystems.com', password: 'admin123', role: 'admin' as const },
@@ -66,7 +68,7 @@ async function seed() {
     console.error('Error seeding users:', err);
     process.exit(1);
   } finally {
-    close();
+    await close();
   }
 }
 

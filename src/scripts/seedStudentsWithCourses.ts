@@ -13,7 +13,10 @@ dotenv.config();
 
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { db, close } from '../config/database.js';
+import { assertSqliteForScript } from './sqliteOnly.js';
+import { close } from '../config/database.js';
+
+const db = assertSqliteForScript('db:seed-students');
 
 const PASSWORD = 'student123';
 const COURSE_CODES = ['BLOCKCHAIN-101', 'SOLIDITY-201', 'WEB3-301'] as const;

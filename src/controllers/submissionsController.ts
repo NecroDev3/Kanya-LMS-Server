@@ -2,7 +2,7 @@ import { Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne, execute } from '../config/database.js';
+import { query, queryOne, execute, sqlNow } from '../config/database.js';
 import { AuthRequest, Submission, SubmissionResponse, Student, User, ErrorCodes, SubmissionStatus } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { deleteFile, getFileUrl, resolveUploadPath } from '../utils/fileUpload.js';
@@ -43,7 +43,7 @@ export async function getSubmissions(req: AuthRequest, res: Response, next: Next
 
     // Resolve studentId from DB if missing in JWT (e.g. token from before student record existed)
     if (!isAdmin && !userStudentId && req.user?.role === 'student' && req.user?.userId) {
-      const student = queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [req.user.userId]);
+      const student = await queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [req.user.userId]);
       userStudentId = student?.id;
     }
 
@@ -79,14 +79,14 @@ export async function getSubmissions(req: AuthRequest, res: Response, next: Next
     const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
 
     // Get total count
-    const countResult = queryOne<{ count: number }>(
+    const countResult = await queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM submissions s ${whereClause}`,
       params
     );
-    const total = countResult?.count || 0;
+    const total = Number(countResult?.count) || 0;
 
     // Get submissions with student name
-    const submissions = query<Submission & { student_name: string; reviewer_name: string }>(
+    const submissions = await query<Submission & { student_name: string; reviewer_name: string }>(
       `SELECT s.*, st.name as student_name, u.name as reviewer_name
        FROM submissions s
        LEFT JOIN students st ON s.student_id = st.id
@@ -120,7 +120,7 @@ export async function getSubmission(req: AuthRequest, res: Response, next: NextF
     const isAdmin = req.user?.role === 'admin';
     const userStudentId = req.user?.studentId;
 
-    const submission = queryOne<Submission & { student_name: string; reviewer_name: string }>(
+    const submission = await queryOne<Submission & { student_name: string; reviewer_name: string }>(
       `SELECT s.*, st.name as student_name, u.name as reviewer_name
        FROM submissions s
        LEFT JOIN students st ON s.student_id = st.id
@@ -155,7 +155,7 @@ export async function createSubmission(req: AuthRequest, res: Response, next: Ne
 
     // If JWT has no studentId (e.g. token from before student record existed), resolve from DB for students
     if (!userStudentId && req.user?.role === 'student' && req.user?.userId) {
-      const student = queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [req.user.userId]);
+      const student = await queryOne<Student>('SELECT id FROM students WHERE user_id = ?', [req.user.userId]);
       userStudentId = student?.id;
     }
 
@@ -189,7 +189,7 @@ export async function createSubmission(req: AuthRequest, res: Response, next: Ne
     }
 
     // Get student info
-    const student = queryOne<Student>(
+    const student = await queryOne<Student>(
       'SELECT * FROM students WHERE id = ?',
       [userStudentId]
     );
@@ -201,7 +201,7 @@ export async function createSubmission(req: AuthRequest, res: Response, next: Ne
 
     // Create submission
     const id = uuidv4();
-    execute(
+    await execute(
       `INSERT INTO submissions (id, student_id, title, description, file_name, file_size, file_path, file_mime_type)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -216,7 +216,7 @@ export async function createSubmission(req: AuthRequest, res: Response, next: Ne
       ]
     );
 
-    const submission = queryOne<Submission>('SELECT * FROM submissions WHERE id = ?', [id]);
+    const submission = await queryOne<Submission>('SELECT * FROM submissions WHERE id = ?', [id]);
 
     if (!submission) {
       if (file) deleteFile(file.path);
@@ -239,7 +239,7 @@ export async function updateSubmission(req: AuthRequest, res: Response, next: Ne
     const userStudentId = req.user?.studentId;
 
     // Get existing submission
-    const existing = queryOne<Submission & { student_name: string }>(
+    const existing = await queryOne<Submission & { student_name: string }>(
       `SELECT s.*, st.name as student_name
        FROM submissions s
        LEFT JOIN students st ON s.student_id = st.id
@@ -297,15 +297,15 @@ export async function updateSubmission(req: AuthRequest, res: Response, next: Ne
       return;
     }
 
-    updates.push(`updated_at = datetime('now')`);
+    updates.push(`updated_at = ${sqlNow()}`);
     params.push(id);
 
-    execute(
+    await execute(
       `UPDATE submissions SET ${updates.join(', ')} WHERE id = ?`,
       params
     );
 
-    const submission = queryOne<Submission>('SELECT * FROM submissions WHERE id = ?', [id]);
+    const submission = await queryOne<Submission>('SELECT * FROM submissions WHERE id = ?', [id]);
 
     res.json({
       success: true,
@@ -323,7 +323,7 @@ export async function deleteSubmission(req: AuthRequest, res: Response, next: Ne
     const userStudentId = req.user?.studentId;
 
     // Get existing submission
-    const existing = queryOne<Submission>(
+    const existing = await queryOne<Submission>(
       'SELECT * FROM submissions WHERE id = ?',
       [id]
     );
@@ -347,7 +347,7 @@ export async function deleteSubmission(req: AuthRequest, res: Response, next: Ne
     deleteFile(existing.file_path);
 
     // Delete submission
-    execute('DELETE FROM submissions WHERE id = ?', [id]);
+    await execute('DELETE FROM submissions WHERE id = ?', [id]);
 
     res.json({
       success: true,
@@ -364,7 +364,7 @@ export async function downloadSubmission(req: AuthRequest, res: Response, next: 
     const isAdmin = req.user?.role === 'admin';
     const userStudentId = req.user?.studentId;
 
-    const submission = queryOne<Submission>(
+    const submission = await queryOne<Submission>(
       'SELECT * FROM submissions WHERE id = ?',
       [id]
     );
@@ -414,7 +414,7 @@ export async function reviewSubmission(req: AuthRequest, res: Response, next: Ne
     }
 
     // Get existing submission
-    const existing = queryOne<Submission>(
+    const existing = await queryOne<Submission>(
       'SELECT * FROM submissions WHERE id = ?',
       [id]
     );
@@ -424,23 +424,23 @@ export async function reviewSubmission(req: AuthRequest, res: Response, next: Ne
     }
 
     // Get admin user info
-    const adminUser = queryOne<User>(
+    const adminUser = await queryOne<User>(
       'SELECT id, name FROM users WHERE id = ?',
       [adminUserId]
     );
 
     // Update submission
-    execute(
+    await execute(
       `UPDATE submissions 
-       SET status = ?, feedback = ?, reviewed_at = datetime('now'), reviewed_by_id = ?, updated_at = datetime('now')
+       SET status = ?, feedback = ?, reviewed_at = ${sqlNow()}, reviewed_by_id = ?, updated_at = ${sqlNow()}
        WHERE id = ?`,
       [status, feedback?.trim() || null, adminUserId, id]
     );
 
-    const submission = queryOne<Submission>('SELECT * FROM submissions WHERE id = ?', [id]);
+    const submission = await queryOne<Submission>('SELECT * FROM submissions WHERE id = ?', [id]);
 
     // Get student name for response
-    const student = queryOne<Student>(
+    const student = await queryOne<Student>(
       'SELECT name FROM students WHERE id = ?',
       [submission!.student_id]
     );

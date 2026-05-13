@@ -46,7 +46,7 @@ describe('GET /api/v1/documents', () => {
   });
 
   it('student cannot see course-restricted doc they lack access to', async () => {
-    execute(
+    await execute(
       `UPDATE course_documents SET course_ids = ? WHERE id = ?`,
       [JSON.stringify([ids.course2Id]), ids.documentId],
     );
@@ -121,7 +121,7 @@ describe('GET /api/v1/documents/:id', () => {
   });
 
   it('student blocked from course-restricted doc', async () => {
-    execute(
+    await execute(
       `UPDATE course_documents SET course_ids = ? WHERE id = ?`,
       [JSON.stringify([ids.course2Id]), ids.documentId],
     );

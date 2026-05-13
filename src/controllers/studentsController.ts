@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne, execute } from '../config/database.js';
+import { query, queryOne, execute, sqlLike, sqlNow } from '../config/database.js';
 import { AuthRequest, Student, StudentResponse, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 
@@ -35,7 +35,8 @@ export async function getStudents(req: AuthRequest, res: Response, next: NextFun
 
     if (search) {
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
-      conditions.push(`(name LIKE ? OR email LIKE ? OR enrollment_number LIKE ?)`);
+      const lk = sqlLike();
+      conditions.push(`(name ${lk} ? OR email ${lk} ? OR enrollment_number ${lk} ?)`);
     }
 
     if (department) {
@@ -53,14 +54,14 @@ export async function getStudents(req: AuthRequest, res: Response, next: NextFun
     }
 
     // Get total count
-    const countResult = queryOne<{ count: number }>(
+    const countResult = await queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM students ${whereClause}`,
       params
     );
-    const total = countResult?.count || 0;
+    const total = Number(countResult?.count) || 0;
 
     // Get students with pagination
-    const students = query<Student>(
+    const students = await query<Student>(
       `SELECT * FROM students ${whereClause} 
        ORDER BY created_at DESC 
        LIMIT ? OFFSET ?`,
@@ -88,7 +89,7 @@ export async function getStudent(req: AuthRequest, res: Response, next: NextFunc
   try {
     const { id } = req.params;
 
-    const student = queryOne<Student>(
+    const student = await queryOne<Student>(
       'SELECT * FROM students WHERE id = ?',
       [id]
     );
@@ -134,7 +135,7 @@ export async function createStudent(req: AuthRequest, res: Response, next: NextF
     }
 
     // Check for duplicates
-    const existingEmail = queryOne<Student>(
+    const existingEmail = await queryOne<Student>(
       'SELECT id FROM students WHERE email = ?',
       [email.toLowerCase()]
     );
@@ -142,7 +143,7 @@ export async function createStudent(req: AuthRequest, res: Response, next: NextF
       errors.push({ field: 'email', message: 'Email already exists' });
     }
 
-    const existingEnrollment = queryOne<Student>(
+    const existingEnrollment = await queryOne<Student>(
       'SELECT id FROM students WHERE enrollment_number = ?',
       [enrollmentNumber]
     );
@@ -156,14 +157,14 @@ export async function createStudent(req: AuthRequest, res: Response, next: NextF
 
     // Create student — also link user_id if a users row with that email already exists
     const id = uuidv4();
-    const existingUser = queryOne<{ id: string }>('SELECT id FROM users WHERE email = ?', [email.toLowerCase()]);
-    execute(
+    const existingUser = await queryOne<{ id: string }>('SELECT id FROM users WHERE email = ?', [email.toLowerCase()]);
+    await execute(
       `INSERT INTO students (id, user_id, name, email, enrollment_number, department, semester)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, existingUser?.id ?? null, name.trim(), email.toLowerCase(), enrollmentNumber.trim(), department.trim(), semester]
     );
 
-    const student = queryOne<Student>('SELECT * FROM students WHERE id = ?', [id]);
+    const student = await queryOne<Student>('SELECT * FROM students WHERE id = ?', [id]);
 
     if (!student) {
       throw new AppError('Failed to create student', 500, ErrorCodes.INTERNAL_ERROR);
@@ -184,7 +185,7 @@ export async function updateStudent(req: AuthRequest, res: Response, next: NextF
     const { name, email, enrollmentNumber, department, semester } = req.body;
 
     // Check if student exists
-    const existing = queryOne<Student>(
+    const existing = await queryOne<Student>(
       'SELECT * FROM students WHERE id = ?',
       [id]
     );
@@ -197,7 +198,7 @@ export async function updateStudent(req: AuthRequest, res: Response, next: NextF
 
     // Check for duplicate email if changing
     if (email && email.toLowerCase() !== existing.email) {
-      const existingEmail = queryOne<Student>(
+      const existingEmail = await queryOne<Student>(
         'SELECT id FROM students WHERE email = ? AND id != ?',
         [email.toLowerCase(), id]
       );
@@ -208,7 +209,7 @@ export async function updateStudent(req: AuthRequest, res: Response, next: NextF
 
     // Check for duplicate enrollment number if changing
     if (enrollmentNumber && enrollmentNumber !== existing.enrollment_number) {
-      const existingEnrollment = queryOne<Student>(
+      const existingEnrollment = await queryOne<Student>(
         'SELECT id FROM students WHERE enrollment_number = ? AND id != ?',
         [enrollmentNumber, id]
       );
@@ -259,15 +260,15 @@ export async function updateStudent(req: AuthRequest, res: Response, next: NextF
       return;
     }
 
-    updates.push(`updated_at = datetime('now')`);
+    updates.push(`updated_at = ${sqlNow()}`);
     params.push(id);
 
-    execute(
+    await execute(
       `UPDATE students SET ${updates.join(', ')} WHERE id = ?`,
       params
     );
 
-    const student = queryOne<Student>('SELECT * FROM students WHERE id = ?', [id]);
+    const student = await queryOne<Student>('SELECT * FROM students WHERE id = ?', [id]);
 
     res.json({
       success: true,
@@ -311,18 +312,18 @@ export async function importStudents(req: AuthRequest, res: Response, next: Next
       }
 
       const emailLower = email.toLowerCase().trim();
-      if (queryOne<Student>('SELECT id FROM students WHERE email = ?', [emailLower])) {
+      if (await queryOne<Student>('SELECT id FROM students WHERE email = ?', [emailLower])) {
         results.push({ row: rowNum, status: 'skipped', name, email, reason: 'Email already exists' });
         continue;
       }
-      if (queryOne<Student>('SELECT id FROM students WHERE enrollment_number = ?', [enrollmentNumber.trim()])) {
+      if (await queryOne<Student>('SELECT id FROM students WHERE enrollment_number = ?', [enrollmentNumber.trim()])) {
         results.push({ row: rowNum, status: 'skipped', name, email, reason: 'Enrollment number already exists' });
         continue;
       }
 
       const id = uuidv4();
-      const existingUser = queryOne<{ id: string }>('SELECT id FROM users WHERE email = ?', [emailLower]);
-      execute(
+      const existingUser = await queryOne<{ id: string }>('SELECT id FROM users WHERE email = ?', [emailLower]);
+      await execute(
         `INSERT INTO students (id, user_id, name, email, enrollment_number, department, semester)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [id, existingUser?.id ?? null, name.trim(), emailLower, enrollmentNumber.trim(), department.trim(), Number(semester)]
@@ -345,7 +346,7 @@ export async function deleteStudent(req: AuthRequest, res: Response, next: NextF
     const { id } = req.params;
 
     // Check if student exists
-    const existing = queryOne<Student>(
+    const existing = await queryOne<Student>(
       'SELECT id FROM students WHERE id = ?',
       [id]
     );
@@ -355,7 +356,7 @@ export async function deleteStudent(req: AuthRequest, res: Response, next: NextF
     }
 
     // Delete student (cascades to submissions due to foreign key)
-    execute('DELETE FROM students WHERE id = ?', [id]);
+    await execute('DELETE FROM students WHERE id = ?', [id]);
 
     res.json({
       success: true,

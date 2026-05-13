@@ -1,7 +1,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { db, close } from '../config/database.js';
+import { assertSqliteForScript } from './sqliteOnly.js';
+import { close } from '../config/database.js';
+
+const db = assertSqliteForScript('db:init');
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -161,7 +164,7 @@ async function initDatabase() {
     console.error('❌ Error initializing database:', error);
     throw error;
   } finally {
-    close();
+    await close();
   }
 }
 

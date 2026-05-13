@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne, execute } from '../config/database.js';
+import { query, queryOne, execute, sqlNow } from '../config/database.js';
 import { AuthRequest, ConversationResponse, MessageResponse, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 
@@ -21,7 +21,7 @@ export async function getConversations(req: AuthRequest, res: Response, next: Ne
       throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
     }
 
-    const rows = query<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
+    const rows = await query<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
       `SELECT id, user1_id, user2_id, updated_at FROM conversations
        WHERE user1_id = ? OR user2_id = ?
        ORDER BY updated_at DESC`,
@@ -30,8 +30,8 @@ export async function getConversations(req: AuthRequest, res: Response, next: Ne
 
     const conversations: ConversationResponse[] = [];
     for (const row of rows) {
-      const u1 = queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user1_id]);
-      const u2 = queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user2_id]);
+      const u1 = await queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user1_id]);
+      const u2 = await queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user2_id]);
       conversations.push({
         id: row.id,
         participantIds: [row.user1_id, row.user2_id],
@@ -63,7 +63,7 @@ export async function postConversations(req: AuthRequest, res: Response, next: N
 
     const [id1, id2] = sortPair(userId, otherUserId.trim());
 
-    let row = queryOne<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
+    let row = await queryOne<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
       'SELECT id, user1_id, user2_id, updated_at FROM conversations WHERE user1_id = ? AND user2_id = ?',
       [id1, id2]
     );
@@ -72,11 +72,11 @@ export async function postConversations(req: AuthRequest, res: Response, next: N
     if (!row) {
       created = true;
       const id = uuidv4();
-      execute(
-        "INSERT INTO conversations (id, user1_id, user2_id, updated_at) VALUES (?, ?, ?, datetime('now'))",
+      await execute(
+        `INSERT INTO conversations (id, user1_id, user2_id, updated_at) VALUES (?, ?, ?, ${sqlNow()})`,
         [id, id1, id2]
       );
-      row = queryOne<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
+      row = await queryOne<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
         'SELECT id, user1_id, user2_id, updated_at FROM conversations WHERE id = ?',
         [id]
       );
@@ -85,8 +85,8 @@ export async function postConversations(req: AuthRequest, res: Response, next: N
       }
     }
 
-    const u1 = queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user1_id]);
-    const u2 = queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user2_id]);
+    const u1 = await queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user1_id]);
+    const u2 = await queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user2_id]);
     const conversation: ConversationResponse = {
       id: row.id,
       participantIds: [row.user1_id, row.user2_id],
@@ -115,7 +115,7 @@ export async function getConversation(req: AuthRequest, res: Response, next: Nex
     }
 
     const { id } = req.params;
-    const row = queryOne<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
+    const row = await queryOne<{ id: string; user1_id: string; user2_id: string; updated_at: string }>(
       'SELECT id, user1_id, user2_id, updated_at FROM conversations WHERE id = ?',
       [id]
     );
@@ -124,8 +124,8 @@ export async function getConversation(req: AuthRequest, res: Response, next: Nex
       throw new AppError('Conversation not found', 404, ErrorCodes.NOT_FOUND);
     }
 
-    const u1 = queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user1_id]);
-    const u2 = queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user2_id]);
+    const u1 = await queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user1_id]);
+    const u2 = await queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [row.user2_id]);
     const conversation: ConversationResponse = {
       id: row.id,
       participantIds: [row.user1_id, row.user2_id],
@@ -150,7 +150,7 @@ export async function getMessages(req: AuthRequest, res: Response, next: NextFun
     }
 
     const { id: conversationId } = req.params;
-    const conv = queryOne<{ user1_id: string; user2_id: string }>(
+    const conv = await queryOne<{ user1_id: string; user2_id: string }>(
       'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
       [conversationId]
     );
@@ -159,7 +159,7 @@ export async function getMessages(req: AuthRequest, res: Response, next: NextFun
       throw new AppError('Conversation not found', 404, ErrorCodes.NOT_FOUND);
     }
 
-    const rows = query<{ id: string; conversation_id: string; sender_id: string; body: string; created_at: string }>(
+    const rows = await query<{ id: string; conversation_id: string; sender_id: string; body: string; created_at: string }>(
       'SELECT id, conversation_id, sender_id, body, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at ASC',
       [conversationId]
     );
@@ -189,7 +189,7 @@ export async function getUnreadCount(req: AuthRequest, res: Response, next: Next
     }
 
     // Count conversations that have messages from the OTHER participant newer than last read
-    const row = queryOne<{ count: number }>(
+    const row = await queryOne<{ count: number }>(
       `SELECT COUNT(*) AS count
        FROM conversations c
        WHERE (c.user1_id = ? OR c.user2_id = ?)
@@ -216,7 +216,7 @@ export async function getUnreadCount(req: AuthRequest, res: Response, next: Next
       [userId, userId, userId, userId, userId, userId]
     );
 
-    res.json({ success: true, data: { count: row?.count ?? 0 } });
+    res.json({ success: true, data: { count: Number(row?.count) || 0 } });
   } catch (error) {
     next(error);
   }
@@ -230,7 +230,7 @@ export async function markConversationRead(req: AuthRequest, res: Response, next
     }
 
     const { id: conversationId } = req.params;
-    const conv = queryOne<{ user1_id: string; user2_id: string }>(
+    const conv = await queryOne<{ user1_id: string; user2_id: string }>(
       'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
       [conversationId]
     );
@@ -239,7 +239,7 @@ export async function markConversationRead(req: AuthRequest, res: Response, next
     }
 
     const now = new Date().toISOString();
-    execute(
+    await execute(
       `INSERT INTO conversation_reads (user_id, conversation_id, last_read_at)
        VALUES (?, ?, ?)
        ON CONFLICT(user_id, conversation_id) DO UPDATE SET last_read_at = excluded.last_read_at`,
@@ -262,8 +262,8 @@ export async function postMessage(req: AuthRequest, res: Response, next: NextFun
     const { id: conversationId } = req.params;
     const { body } = req.body;
 
-    const conv = queryOne<{ id: string }>('SELECT id FROM conversations WHERE id = ?', [conversationId]);
-    const convCheck = queryOne<{ user1_id: string; user2_id: string }>(
+    const conv = await queryOne<{ id: string }>('SELECT id FROM conversations WHERE id = ?', [conversationId]);
+    const convCheck = await queryOne<{ user1_id: string; user2_id: string }>(
       'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
       [conversationId]
     );
@@ -283,11 +283,11 @@ export async function postMessage(req: AuthRequest, res: Response, next: NextFun
     const bodyText = typeof body === 'string' ? body.trim() : String(body);
     const now = new Date().toISOString();
 
-    execute(
+    await execute(
       'INSERT INTO conversation_messages (id, conversation_id, sender_id, body, created_at) VALUES (?, ?, ?, ?, ?)',
       [messageId, conversationId, userId, bodyText, now]
     );
-    execute('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId]);
+    await execute('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId]);
 
     const message: MessageResponse = {
       id: messageId,

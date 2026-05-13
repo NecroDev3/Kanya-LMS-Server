@@ -2,14 +2,13 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import app from './app.js';
-import { db, close } from './config/database.js';
+import { testConnection, close } from './config/database.js';
 
 const PORT = process.env.PORT || 3001;
 
-function startServer() {
+async function startServer(): Promise<void> {
   try {
-    // Test database connection
-    db.prepare('SELECT 1').get();
+    await testConnection();
     console.log('✅ Database connected successfully');
 
     app.listen(PORT, () => {
@@ -30,21 +29,22 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', (error) => {
   console.error('💥 Uncaught exception:', error);
-  close();
-  process.exit(1);
+  void close().finally(() => process.exit(1));
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
+async function shutdown(): Promise<void> {
   console.log('\n🛑 Shutting down gracefully...');
-  close();
+  await close();
   process.exit(0);
+}
+
+process.on('SIGINT', () => {
+  void shutdown();
 });
 
 process.on('SIGTERM', () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  close();
-  process.exit(0);
+  void shutdown();
 });
 
-startServer();
+void startServer();

@@ -90,7 +90,7 @@ export async function getTopics(req: AuthRequest, res: Response, next: NextFunct
     const rawCourseId = req.query.courseId as string | undefined;
     const filterGeneral = !rawCourseId || rawCourseId === 'general';
 
-    const rows = query<{
+    const rows = await query<{
       id: string;
       title: string;
       body: string;
@@ -129,7 +129,7 @@ export async function getTopic(req: AuthRequest, res: Response, next: NextFuncti
   try {
     const { id } = req.params;
 
-    const row = queryOne<{
+    const row = await queryOne<{
       id: string;
       title: string;
       body: string;
@@ -170,12 +170,12 @@ export async function getPosts(req: AuthRequest, res: Response, next: NextFuncti
   try {
     const { topicId } = req.params;
 
-    const topicExists = queryOne<{ id: string }>('SELECT id FROM forum_topics WHERE id = ?', [topicId]);
+    const topicExists = await queryOne<{ id: string }>('SELECT id FROM forum_topics WHERE id = ?', [topicId]);
     if (!topicExists) {
       throw new AppError('Topic not found', 404, ErrorCodes.NOT_FOUND);
     }
 
-    const rows = query<{
+    const rows = await query<{
       id: string;
       topic_id: string;
       body: string;
@@ -231,24 +231,24 @@ export async function createTopic(req: AuthRequest, res: Response, next: NextFun
         : null;
 
     if (resolvedCourseId) {
-      const courseExists = queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [resolvedCourseId]);
+      const courseExists = await queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [resolvedCourseId]);
       if (!courseExists) {
         throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
       }
     }
 
-    const author = queryOne<User>('SELECT id, name, email, role FROM users WHERE id = ?', [userId]);
+    const author = await queryOne<User>('SELECT id, name, email, role FROM users WHERE id = ?', [userId]);
     if (!author) {
       throw new AppError('User not found', 401, ErrorCodes.UNAUTHORIZED);
     }
 
     const id = uuidv4();
-    execute(
+    await execute(
       `INSERT INTO forum_topics (id, title, body, author_id, course_id) VALUES (?, ?, ?, ?, ?)`,
       [id, String(title).trim(), String(body).trim(), userId, resolvedCourseId]
     );
 
-    const row = queryOne<{
+    const row = await queryOne<{
       id: string;
       title: string;
       body: string;
@@ -292,7 +292,7 @@ export async function createPost(req: AuthRequest, res: Response, next: NextFunc
     const { topicId } = req.params;
     const { body } = req.body;
 
-    const topicExists = queryOne<{ id: string }>('SELECT id FROM forum_topics WHERE id = ?', [topicId]);
+    const topicExists = await queryOne<{ id: string }>('SELECT id FROM forum_topics WHERE id = ?', [topicId]);
     if (!topicExists) {
       throw new AppError('Topic not found', 404, ErrorCodes.NOT_FOUND);
     }
@@ -305,18 +305,18 @@ export async function createPost(req: AuthRequest, res: Response, next: NextFunc
       throw new AppError('Validation failed', 400, ErrorCodes.VALIDATION_ERROR, errors);
     }
 
-    const author = queryOne<User>('SELECT id, name, email, role FROM users WHERE id = ?', [userId]);
+    const author = await queryOne<User>('SELECT id, name, email, role FROM users WHERE id = ?', [userId]);
     if (!author) {
       throw new AppError('User not found', 401, ErrorCodes.UNAUTHORIZED);
     }
 
     const id = uuidv4();
-    execute(
+    await execute(
       `INSERT INTO forum_posts (id, topic_id, body, author_id) VALUES (?, ?, ?, ?)`,
       [id, topicId, String(body).trim(), userId]
     );
 
-    const row = queryOne<{
+    const row = await queryOne<{
       id: string;
       topic_id: string;
       body: string;

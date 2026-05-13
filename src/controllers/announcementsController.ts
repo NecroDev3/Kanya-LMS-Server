@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne, execute } from '../config/database.js';
+import { query, queryOne, execute, sqlNow } from '../config/database.js';
 import { AuthRequest, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 
@@ -62,12 +62,12 @@ export async function getAnnouncements(req: AuthRequest, res: Response, next: Ne
     let rows: AnnouncementRow[];
 
     if (role === 'admin') {
-      rows = query<AnnouncementRow>(
+      rows = await query<AnnouncementRow>(
         `${SELECT} ORDER BY a.pinned DESC, a.created_at DESC`
       );
     } else {
       // student: general + courses they are enrolled in (via user_course_codes)
-      rows = query<AnnouncementRow>(
+      rows = await query<AnnouncementRow>(
         `${SELECT}
          WHERE a.scope = 'general'
             OR (
@@ -103,19 +103,19 @@ export async function createAnnouncement(req: AuthRequest, res: Response, next: 
 
     if (resolvedScope === 'course') {
       if (!courseId) throw new AppError('courseId is required for course announcements', 400, ErrorCodes.VALIDATION_ERROR);
-      const course = queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [courseId]);
+      const course = await queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [courseId]);
       if (!course) throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
       resolvedCourseId = courseId;
     }
 
     const id = uuidv4();
-    execute(
+    await execute(
       `INSERT INTO announcements (id, title, body, scope, course_id, author_id, pinned)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, String(title).trim(), String(body).trim(), resolvedScope, resolvedCourseId, userId, pinned ? 1 : 0]
     );
 
-    const row = queryOne<AnnouncementRow>(`${SELECT} WHERE a.id = ?`, [id]);
+    const row = await queryOne<AnnouncementRow>(`${SELECT} WHERE a.id = ?`, [id]);
     if (!row) throw new AppError('Failed to create announcement', 500, ErrorCodes.INTERNAL_ERROR);
 
     res.status(201).json({ success: true, data: rowToAnnouncement(row) });
@@ -126,11 +126,11 @@ export async function createAnnouncement(req: AuthRequest, res: Response, next: 
 export async function updateAnnouncement(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    const existing = queryOne<{ id: string }>('SELECT id FROM announcements WHERE id = ?', [id]);
+    const existing = await queryOne<{ id: string }>('SELECT id FROM announcements WHERE id = ?', [id]);
     if (!existing) throw new AppError('Announcement not found', 404, ErrorCodes.NOT_FOUND);
 
     const { title, body, scope, courseId, pinned } = req.body ?? {};
-    const updates: string[] = ["updated_at = datetime('now')"];
+    const updates: string[] = [`updated_at = ${sqlNow()}`];
     const params: unknown[] = [];
 
     if (title !== undefined) { updates.push('title = ?'); params.push(String(title).trim()); }
@@ -151,9 +151,9 @@ export async function updateAnnouncement(req: AuthRequest, res: Response, next: 
     }
 
     params.push(id);
-    execute(`UPDATE announcements SET ${updates.join(', ')} WHERE id = ?`, params);
+    await execute(`UPDATE announcements SET ${updates.join(', ')} WHERE id = ?`, params);
 
-    const row = queryOne<AnnouncementRow>(`${SELECT} WHERE a.id = ?`, [id]);
+    const row = await queryOne<AnnouncementRow>(`${SELECT} WHERE a.id = ?`, [id]);
     res.json({ success: true, data: rowToAnnouncement(row!) });
   } catch (error) { next(error); }
 }
@@ -162,7 +162,7 @@ export async function updateAnnouncement(req: AuthRequest, res: Response, next: 
 export async function deleteAnnouncement(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    execute('DELETE FROM announcements WHERE id = ?', [id]);
+    await execute('DELETE FROM announcements WHERE id = ?', [id]);
     res.json({ success: true });
   } catch (error) { next(error); }
 }

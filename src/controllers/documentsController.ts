@@ -2,7 +2,7 @@ import { Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne, execute } from '../config/database.js';
+import { query, queryOne, execute, sqlLike, sqlNow } from '../config/database.js';
 import { AuthRequest, CourseDocument, CourseDocumentResponse, User, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { deleteFile, getDocumentFileUrl, resolveUploadPath } from '../utils/fileUpload.js';
@@ -38,22 +38,22 @@ function parseCourseIdsFromBody(raw: unknown): string | null {
   return arr.length > 0 ? JSON.stringify(arr) : null;
 }
 
-function getUserCourseCodes(userId: string): string[] {
-  const rows = query<{ course_code: string }>(
+async function getUserCourseCodes(userId: string): Promise<string[]> {
+  const rows = await query<{ course_code: string }>(
     'SELECT course_code FROM user_course_codes WHERE user_id = ?',
     [userId]
   );
   return rows.map((r) => r.course_code);
 }
 
-function userCanAccessDocument(
+async function userCanAccessDocument(
   docCourseIds: string[],
   userCourseCodes: string[],
   isAdmin: boolean
-): boolean {
+): Promise<boolean> {
   if (isAdmin) return true;
   if (docCourseIds.length === 0) return true;
-  const codesForDocCourses = query<{ course_code: string }>(
+  const codesForDocCourses = await query<{ course_code: string }>(
     `SELECT course_code FROM courses WHERE id IN (${docCourseIds.map(() => '?').join(',')})`,
     docCourseIds
   );
@@ -109,11 +109,12 @@ export async function getDocuments(req: AuthRequest, res: Response, next: NextFu
     }
     if (search) {
       params.push(`%${search}%`, `%${search}%`);
-      conditions.push(`(d.title LIKE ? OR d.description LIKE ?)`);
+      const lk = sqlLike();
+      conditions.push(`(d.title ${lk} ? OR d.description ${lk} ?)`);
     }
     const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
 
-    let allDocs = query<CourseDocument & { uploader_name: string }>(
+    let allDocs = await query<CourseDocument & { uploader_name: string }>(
       `SELECT d.*, u.name as uploader_name
        FROM course_documents d
        LEFT JOIN users u ON d.uploaded_by_id = u.id
@@ -123,11 +124,14 @@ export async function getDocuments(req: AuthRequest, res: Response, next: NextFu
     );
 
     if (!isAdmin && userId) {
-      const userCodes = getUserCourseCodes(userId);
-      allDocs = allDocs.filter((d) => {
-        const docCourseIds = parseCourseIds(d.course_ids);
-        return userCanAccessDocument(docCourseIds, userCodes, false);
-      });
+      const userCodes = await getUserCourseCodes(userId);
+      const flags = await Promise.all(
+        allDocs.map(async (d) => {
+          const docCourseIds = parseCourseIds(d.course_ids);
+          return userCanAccessDocument(docCourseIds, userCodes, false);
+        })
+      );
+      allDocs = allDocs.filter((_, i) => flags[i]);
     }
 
     const total = allDocs.length;
@@ -157,7 +161,7 @@ export async function getDocument(req: AuthRequest, res: Response, next: NextFun
     const isAdmin = req.user?.role === 'admin';
     const userId = req.user?.userId;
 
-    const document = queryOne<CourseDocument & { uploader_name: string }>(
+    const document = await queryOne<CourseDocument & { uploader_name: string }>(
       `SELECT d.*, u.name as uploader_name
        FROM course_documents d
        LEFT JOIN users u ON d.uploaded_by_id = u.id
@@ -171,8 +175,8 @@ export async function getDocument(req: AuthRequest, res: Response, next: NextFun
 
     if (!isAdmin && userId) {
       const docCourseIds = parseCourseIds(document.course_ids);
-      const userCodes = getUserCourseCodes(userId);
-      if (!userCanAccessDocument(docCourseIds, userCodes, false)) {
+      const userCodes = await getUserCourseCodes(userId);
+      if (!(await userCanAccessDocument(docCourseIds, userCodes, false))) {
         throw new AppError('You do not have access to this document', 403, ErrorCodes.FORBIDDEN);
       }
     }
@@ -222,14 +226,14 @@ export async function createDocument(req: AuthRequest, res: Response, next: Next
     }
 
     // Get admin user info
-    const adminUser = queryOne<User>(
+    const adminUser = await queryOne<User>(
       'SELECT id, name FROM users WHERE id = ?',
       [adminUserId]
     );
 
     // Create document
     const id = uuidv4();
-    execute(
+    await execute(
       `INSERT INTO course_documents (id, title, description, category, file_name, file_size, file_path, file_mime_type, course_ids, uploaded_by_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -246,7 +250,7 @@ export async function createDocument(req: AuthRequest, res: Response, next: Next
       ]
     );
 
-    const document = queryOne<CourseDocument>('SELECT * FROM course_documents WHERE id = ?', [id]);
+    const document = await queryOne<CourseDocument>('SELECT * FROM course_documents WHERE id = ?', [id]);
 
     if (!document) {
       if (file) deleteFile(file.path);
@@ -268,7 +272,7 @@ export async function updateDocument(req: AuthRequest, res: Response, next: Next
     const { title, description, category, courseIds } = req.body;
 
     // Get existing document
-    const existing = queryOne<CourseDocument & { uploader_name: string }>(
+    const existing = await queryOne<CourseDocument & { uploader_name: string }>(
       `SELECT d.*, u.name as uploader_name
        FROM course_documents d
        LEFT JOIN users u ON d.uploaded_by_id = u.id
@@ -324,15 +328,15 @@ export async function updateDocument(req: AuthRequest, res: Response, next: Next
       return;
     }
 
-    updates.push(`updated_at = datetime('now')`);
+    updates.push(`updated_at = ${sqlNow()}`);
     params.push(id);
 
-    execute(
+    await execute(
       `UPDATE course_documents SET ${updates.join(', ')} WHERE id = ?`,
       params
     );
 
-    const document = queryOne<CourseDocument & { uploader_name: string }>(
+    const document = await queryOne<CourseDocument & { uploader_name: string }>(
       `SELECT d.*, u.name as uploader_name
        FROM course_documents d
        LEFT JOIN users u ON d.uploaded_by_id = u.id
@@ -354,7 +358,7 @@ export async function deleteDocument(req: AuthRequest, res: Response, next: Next
     const { id } = req.params;
 
     // Get existing document
-    const existing = queryOne<CourseDocument>(
+    const existing = await queryOne<CourseDocument>(
       'SELECT * FROM course_documents WHERE id = ?',
       [id]
     );
@@ -367,7 +371,7 @@ export async function deleteDocument(req: AuthRequest, res: Response, next: Next
     deleteFile(existing.file_path);
 
     // Delete document
-    execute('DELETE FROM course_documents WHERE id = ?', [id]);
+    await execute('DELETE FROM course_documents WHERE id = ?', [id]);
 
     res.json({
       success: true,
@@ -384,7 +388,7 @@ export async function downloadDocument(req: AuthRequest, res: Response, next: Ne
     const isAdmin = req.user?.role === 'admin';
     const userId = req.user?.userId;
 
-    const document = queryOne<CourseDocument>(
+    const document = await queryOne<CourseDocument>(
       'SELECT * FROM course_documents WHERE id = ?',
       [id]
     );
@@ -395,8 +399,8 @@ export async function downloadDocument(req: AuthRequest, res: Response, next: Ne
 
     if (!isAdmin && userId) {
       const docCourseIds = parseCourseIds(document.course_ids);
-      const userCodes = getUserCourseCodes(userId);
-      if (!userCanAccessDocument(docCourseIds, userCodes, false)) {
+      const userCodes = await getUserCourseCodes(userId);
+      if (!(await userCanAccessDocument(docCourseIds, userCodes, false))) {
         throw new AppError('You do not have access to this document', 403, ErrorCodes.FORBIDDEN);
       }
     }
@@ -419,7 +423,7 @@ export async function downloadDocument(req: AuthRequest, res: Response, next: Ne
 export async function getCategories(_req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     // Get unique categories from database
-    const dbCategories = query<{ category: string }>(
+    const dbCategories = await query<{ category: string }>(
       'SELECT DISTINCT category FROM course_documents ORDER BY category'
     );
 

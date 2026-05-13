@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne, execute } from '../config/database.js';
+import { query, queryOne, execute, sqlNow } from '../config/database.js';
 import { AuthRequest, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 
@@ -155,7 +155,7 @@ function validateQuestions(questions: unknown): QuizQuestion[] {
 
 export async function listQuizzes(_req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const rows = query<QuizRow>('SELECT * FROM quizzes ORDER BY updated_at DESC');
+    const rows = await query<QuizRow>('SELECT * FROM quizzes ORDER BY updated_at DESC');
     res.json({
       success: true,
       data: { quizzes: rows.map(rowToQuiz) },
@@ -168,7 +168,7 @@ export async function listQuizzes(_req: AuthRequest, res: Response, next: NextFu
 export async function getQuiz(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const id = parseQuizIdParam(req.params.id);
-    const row = queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
+    const row = await queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
     if (!row) {
       throw new AppError('Quiz not found', 404, ErrorCodes.NOT_FOUND);
     }
@@ -208,18 +208,18 @@ export async function createQuiz(req: AuthRequest, res: Response, next: NextFunc
         ? String(body.id).trim()
         : uuidv4();
 
-    const existing = queryOne<{ id: string }>('SELECT id FROM quizzes WHERE id = ?', [id]);
+    const existing = await queryOne<{ id: string }>('SELECT id FROM quizzes WHERE id = ?', [id]);
     if (existing) {
       throw new AppError('A quiz with this id already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
     }
 
-    execute(
+    await execute(
       `INSERT INTO quizzes (id, title, description, information, course_id, passing_score, questions)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, title, description, information, courseId, passingScore, JSON.stringify(questions)]
     );
 
-    const row = queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
+    const row = await queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
     if (!row) {
       throw new AppError('Failed to create quiz', 500, ErrorCodes.INTERNAL_ERROR);
     }
@@ -236,7 +236,7 @@ export async function createQuiz(req: AuthRequest, res: Response, next: NextFunc
 export async function updateQuiz(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const id = parseQuizIdParam(req.params.id);
-    const existing = queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
+    const existing = await queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
     if (!existing) {
       throw new AppError('Quiz not found', 404, ErrorCodes.NOT_FOUND);
     }
@@ -290,11 +290,11 @@ export async function updateQuiz(req: AuthRequest, res: Response, next: NextFunc
       return;
     }
 
-    updates.push(`updated_at = datetime('now')`);
+    updates.push(`updated_at = ${sqlNow()}`);
     params.push(id);
-    execute(`UPDATE quizzes SET ${updates.join(', ')} WHERE id = ?`, params);
+    await execute(`UPDATE quizzes SET ${updates.join(', ')} WHERE id = ?`, params);
 
-    const row = queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
+    const row = await queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [id]);
     res.json({
       success: true,
       data: rowToQuiz(row!),
@@ -307,11 +307,11 @@ export async function updateQuiz(req: AuthRequest, res: Response, next: NextFunc
 export async function deleteQuiz(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const id = parseQuizIdParam(req.params.id);
-    const existing = queryOne<{ id: string }>('SELECT id FROM quizzes WHERE id = ?', [id]);
+    const existing = await queryOne<{ id: string }>('SELECT id FROM quizzes WHERE id = ?', [id]);
     if (!existing) {
       throw new AppError('Quiz not found', 404, ErrorCodes.NOT_FOUND);
     }
-    execute('DELETE FROM quizzes WHERE id = ?', [id]);
+    await execute('DELETE FROM quizzes WHERE id = ?', [id]);
     res.json({ success: true });
   } catch (error) {
     next(error);
@@ -325,7 +325,7 @@ export async function getCompletionsForUser(req: AuthRequest, res: Response, nex
       throw new AppError('userId query parameter is required', 400, ErrorCodes.VALIDATION_ERROR);
     }
 
-    const rows = query<QuizCompletionRow>(
+    const rows = await query<QuizCompletionRow>(
       'SELECT * FROM quiz_completions WHERE user_id = ? ORDER BY completed_at DESC',
       [userId.trim()]
     );
@@ -347,7 +347,7 @@ export async function getCompletion(req: AuthRequest, res: Response, next: NextF
       throw new AppError('userId query parameter is required', 400, ErrorCodes.VALIDATION_ERROR);
     }
 
-    const row = queryOne<QuizCompletionRow>(
+    const row = await queryOne<QuizCompletionRow>(
       'SELECT * FROM quiz_completions WHERE quiz_id = ? AND user_id = ?',
       [quizId, userId.trim()]
     );
@@ -376,7 +376,7 @@ export async function submitQuiz(req: AuthRequest, res: Response, next: NextFunc
     }
     const answersMap = answers as Record<string, string>;
 
-    const quiz = queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [quizId]);
+    const quiz = await queryOne<QuizRow>('SELECT * FROM quizzes WHERE id = ?', [quizId]);
     if (!quiz) {
       throw new AppError('Quiz not found', 404, ErrorCodes.NOT_FOUND);
     }
@@ -386,14 +386,14 @@ export async function submitQuiz(req: AuthRequest, res: Response, next: NextFunc
     const passed = score >= (quiz.passing_score ?? 70) ? 1 : 0;
     const completionId = uuidv4();
 
-    execute('DELETE FROM quiz_completions WHERE quiz_id = ? AND user_id = ?', [quizId, userId]);
-    execute(
+    await execute('DELETE FROM quiz_completions WHERE quiz_id = ? AND user_id = ?', [quizId, userId]);
+    await execute(
       `INSERT INTO quiz_completions (id, quiz_id, user_id, score, total, passed, answers, payment_status, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'none', datetime('now'))`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'none', ${sqlNow()})`,
       [completionId, quizId, userId, score, total, passed, JSON.stringify(answersMap)]
     );
 
-    const row = queryOne<QuizCompletionRow>(
+    const row = await queryOne<QuizCompletionRow>(
       'SELECT * FROM quiz_completions WHERE id = ?',
       [completionId]
     );
