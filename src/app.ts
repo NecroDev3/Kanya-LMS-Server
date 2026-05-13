@@ -29,8 +29,12 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// Honor X-Forwarded-* when deployed behind a reverse proxy (needed for correct IP-based rate limits).
-if (process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true') {
+// Honor X-Forwarded-* when behind a reverse proxy (express-rate-limit requires this if X-Forwarded-For is present).
+const behindProxy =
+  process.env.TRUST_PROXY === '1' ||
+  process.env.TRUST_PROXY === 'true' ||
+  process.env.RENDER === 'true';
+if (behindProxy) {
   app.set('trust proxy', 1);
 }
 
