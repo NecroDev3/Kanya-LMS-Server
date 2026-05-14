@@ -261,6 +261,85 @@ export async function myAttendance(req: AuthRequest, res: Response, next: NextFu
   } catch (err) { next(err); }
 }
 
+// ── Admin: export session as CSV ──────────────────────────────────────────────
+
+/** GET /attendance/:id/export  (admin only) */
+export async function exportSession(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (req.user?.role !== 'admin') throw new AppError('Admin access required', 403, ErrorCodes.FORBIDDEN);
+    const { id } = req.params;
+
+    const session = await queryOne<AttendanceSession & { course_name: string; course_code: string }>(
+      `SELECT s.*, c.title AS course_name, c.course_code
+       FROM attendance_sessions s
+       JOIN courses c ON c.id = s.course_id
+       WHERE s.id = ?`,
+      [id]
+    );
+    if (!session) throw new AppError('Attendance session not found', 404, ErrorCodes.NOT_FOUND);
+
+    // All students enrolled in this course
+    type EnrolledStudent = {
+      student_id: string;
+      name: string;
+      email: string;
+      enrollment_number: string;
+      department: string | null;
+    };
+    const enrolled = await query<EnrolledStudent>(
+      `SELECT st.id AS student_id, st.name, st.email, st.enrollment_number, st.department
+       FROM students st
+       JOIN users u ON u.id = st.user_id
+       JOIN user_course_codes ucc ON ucc.user_id = u.id
+       JOIN courses c ON c.course_code = ucc.course_code
+       WHERE c.id = ?
+       ORDER BY st.name ASC`,
+      [session.course_id]
+    );
+
+    // Attendance records for this session
+    const records = await query<{ student_id: string; marked_at: string }>(
+      'SELECT student_id, marked_at FROM attendance_records WHERE session_id = ?',
+      [id]
+    );
+    const markedMap = new Map(records.map(r => [r.student_id, r.marked_at]));
+
+    // Build CSV
+    const dateStr = session.session_date.slice(0, 10);
+    const csvLines: string[] = [
+      // Header metadata (like the register form)
+      `"ATTENDANCE REGISTER"`,
+      `"Date:","${dateStr}"`,
+      `"Course:","${session.course_name}"`,
+      `"Session:","${session.title}"`,
+      ``,
+      // Column headers
+      `"No.","First Name","Last Name","Enrollment Number","Email","Department","Status","Time Marked"`,
+    ];
+
+    enrolled.forEach((s, idx) => {
+      const nameParts = s.name.trim().split(/\s+/);
+      const lastName = nameParts.length > 1 ? nameParts.pop()! : '';
+      const firstName = nameParts.join(' ');
+      const markedAt = markedMap.get(s.student_id);
+      const status = markedAt ? 'Present' : 'Absent';
+      const timeMarked = markedAt
+        ? new Date(markedAt).toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })
+        : '';
+      csvLines.push(
+        `"${idx + 1}","${firstName}","${lastName}","${s.enrollment_number}","${s.email}","${s.department ?? ''}","${status}","${timeMarked}"`
+      );
+    });
+
+    const csv = csvLines.join('\n');
+    const filename = `attendance_${dateStr}_${session.course_name.replace(/\s+/g, '_')}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send('\uFEFF' + csv); // BOM for Excel compatibility
+  } catch (err) { next(err); }
+}
+
 // ── Shared SELECT ─────────────────────────────────────────────────────────────
 
 const SESSION_SELECT = `
