@@ -5,7 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { query, queryOne, execute, sqlLike, sqlNow } from '../config/database.js';
 import { AuthRequest, CourseDocument, CourseDocumentResponse, User, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
-import { deleteFile, getDocumentFileUrl, resolveUploadPath } from '../utils/fileUpload.js';
+import { deleteFile, getDocumentFileUrl, resolveUploadPath, storeUploadedFile } from '../utils/fileUpload.js';
+import { isR2Enabled, deleteFromR2, streamFromR2 } from '../config/storage.js';
 
 function parseCourseIds(courseIdsJson: string | null | undefined): string[] {
   if (courseIdsJson == null || courseIdsJson === '') return [];
@@ -231,6 +232,9 @@ export async function createDocument(req: AuthRequest, res: Response, next: Next
       [adminUserId]
     );
 
+    // Store file (R2 or disk)
+    const { storagePath } = await storeUploadedFile(file!, 'documents');
+
     // Create document
     const id = uuidv4();
     await execute(
@@ -243,7 +247,7 @@ export async function createDocument(req: AuthRequest, res: Response, next: Next
         category.trim(),
         file!.originalname,
         file!.size,
-        file!.path,
+        storagePath,
         file!.mimetype,
         courseIdsJson,
         adminUserId,
@@ -367,8 +371,12 @@ export async function deleteDocument(req: AuthRequest, res: Response, next: Next
       throw new AppError('Document not found', 404, ErrorCodes.NOT_FOUND);
     }
 
-    // Delete file
-    deleteFile(existing.file_path);
+    // Delete file from R2 or disk
+    if (isR2Enabled) {
+      await deleteFromR2(existing.file_path);
+    } else {
+      deleteFile(existing.file_path);
+    }
 
     // Delete document
     await execute('DELETE FROM course_documents WHERE id = ?', [id]);
@@ -405,12 +413,15 @@ export async function downloadDocument(req: AuthRequest, res: Response, next: Ne
       }
     }
 
-    const safePath = resolveUploadPath(document.file_path);
+    if (isR2Enabled) {
+      await streamFromR2(document.file_path, res, document.file_name, document.file_mime_type || 'application/octet-stream');
+      return;
+    }
 
+    const safePath = resolveUploadPath(document.file_path);
     if (!fs.existsSync(safePath)) {
       throw new AppError('File not found', 404, ErrorCodes.NOT_FOUND);
     }
-
     res.setHeader('Content-Type', document.file_mime_type || 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${document.file_name}"`);
     res.setHeader('Content-Length', document.file_size);

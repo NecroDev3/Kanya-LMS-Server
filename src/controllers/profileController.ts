@@ -6,6 +6,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
+import { isR2Enabled, uploadFileToR2, deleteFromR2, getR2Url } from '../config/storage.js';
 
 // ── Avatar upload config ────────────────────────────────────────────────────
 
@@ -52,14 +53,20 @@ function parseLinks(raw: string | null): CustomLink[] {
   catch { return []; }
 }
 
-function buildProfileResponse(user: UserRow, profile: ProfileRow | null, baseUrl: string) {
+async function buildProfileResponse(user: UserRow, profile: ProfileRow | null, baseUrl: string) {
+  let avatarUrl: string | null = null;
+  if (profile?.avatar_path) {
+    if (isR2Enabled) {
+      avatarUrl = await getR2Url(profile.avatar_path);
+    } else {
+      avatarUrl = `${baseUrl}/uploads/avatars/${path.basename(profile.avatar_path)}`;
+    }
+  }
   return {
     id: user.id,
     displayName: user.name,
     description: user.description ?? '',
-    avatarUrl: profile?.avatar_path
-      ? `${baseUrl}/uploads/avatars/${path.basename(profile.avatar_path)}`
-      : null,
+    avatarUrl,
     whatsapp: profile?.whatsapp ?? null,
     telegram: profile?.telegram ?? null,
     linkedinUrl: profile?.linkedin_url ?? null,
@@ -84,7 +91,7 @@ export async function getProfile(req: AuthRequest, res: Response, next: NextFunc
     const user = await queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
     if (!user) throw new AppError('User not found', 404, ErrorCodes.NOT_FOUND);
     const profile = await queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
-    res.json({ success: true, data: buildProfileResponse(user, profile, getBaseUrl(req)) });
+    res.json({ success: true, data: await buildProfileResponse(user, profile, getBaseUrl(req)) });
   } catch (error) { next(error); }
 }
 
@@ -95,7 +102,7 @@ export async function getProfileById(req: AuthRequest, res: Response, next: Next
     const user = await queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
     if (!user) throw new AppError('User not found', 404, ErrorCodes.NOT_FOUND);
     const profile = await queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
-    res.json({ success: true, data: buildProfileResponse(user, profile, getBaseUrl(req)) });
+    res.json({ success: true, data: await buildProfileResponse(user, profile, getBaseUrl(req)) });
   } catch (error) { next(error); }
 }
 
@@ -166,7 +173,7 @@ export async function patchProfile(req: AuthRequest, res: Response, next: NextFu
 
     const updatedUser = await queryOne<UserRow>('SELECT id, name, description FROM users WHERE id = ?', [userId]);
     const updatedProfile = await queryOne<ProfileRow>('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
-    res.json({ success: true, data: buildProfileResponse(updatedUser!, updatedProfile, getBaseUrl(req)) });
+    res.json({ success: true, data: await buildProfileResponse(updatedUser!, updatedProfile, getBaseUrl(req)) });
   } catch (error) { next(error); }
 }
 
@@ -179,19 +186,35 @@ export async function uploadAvatar(req: AuthRequest, res: Response, next: NextFu
 
     // Delete old avatar if any
     const existing = await queryOne<{ avatar_path: string | null }>('SELECT avatar_path FROM user_profiles WHERE user_id = ?', [userId]);
-    if (existing?.avatar_path && fs.existsSync(existing.avatar_path)) {
-      fs.unlink(existing.avatar_path, () => {});
+    if (existing?.avatar_path) {
+      if (isR2Enabled) {
+        await deleteFromR2(existing.avatar_path);
+      } else if (fs.existsSync(existing.avatar_path)) {
+        fs.unlink(existing.avatar_path, () => {});
+      }
     }
 
-    const filePath = req.file.path;
+    let storagePath: string;
+    let avatarUrl: string;
+
+    if (isR2Enabled) {
+      const ext = path.extname(req.file.originalname).toLowerCase() || '.jpg';
+      const r2Key = `avatars/${uuidv4()}${ext}`;
+      await uploadFileToR2(req.file.path, r2Key, req.file.mimetype, true);
+      storagePath = r2Key;
+      avatarUrl = await getR2Url(r2Key);
+    } else {
+      storagePath = req.file.path;
+      avatarUrl = `${getBaseUrl(req)}/uploads/avatars/${path.basename(storagePath)}`;
+    }
+
     const prevProfile = await queryOne<{ user_id: string }>('SELECT user_id FROM user_profiles WHERE user_id = ?', [userId]);
     if (prevProfile) {
-      await execute(`UPDATE user_profiles SET avatar_path = ?, updated_at = ${sqlNow()} WHERE user_id = ?`, [filePath, userId]);
+      await execute(`UPDATE user_profiles SET avatar_path = ?, updated_at = ${sqlNow()} WHERE user_id = ?`, [storagePath, userId]);
     } else {
-      await execute('INSERT INTO user_profiles (user_id, avatar_path) VALUES (?, ?)', [userId, filePath]);
+      await execute('INSERT INTO user_profiles (user_id, avatar_path) VALUES (?, ?)', [userId, storagePath]);
     }
 
-    const avatarUrl = `${getBaseUrl(req)}/uploads/avatars/${path.basename(filePath)}`;
     res.json({ success: true, data: { avatarUrl } });
   } catch (error) { next(error); }
 }

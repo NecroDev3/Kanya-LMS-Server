@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
 import { AppError } from '../middleware/errorHandler.js';
 import { ErrorCodes } from '../types/index.js';
+import { isR2Enabled, uploadFileToR2 } from '../config/storage.js';
 
 dotenv.config();
 
@@ -133,6 +134,31 @@ export function deleteFile(filePath: string): void {
   } catch (error) {
     console.error('Error deleting file:', error);
   }
+}
+
+/**
+ * After multer saves a file to disk, call this to move it to R2.
+ * Returns the storage key (R2) or local path (disk), and whether R2 was used.
+ *
+ * @param file       The multer file object
+ * @param subdir     e.g. "submissions" or "documents"
+ * @returns          { storagePath, r2Key, usingR2 }
+ */
+export async function storeUploadedFile(
+  file: Express.Multer.File,
+  subdir: string
+): Promise<{ storagePath: string; r2Key: string | null; usingR2: boolean }> {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const r2Key = `${subdir}/${year}/${month}/${path.basename(file.path)}`;
+
+  if (isR2Enabled) {
+    await uploadFileToR2(file.path, r2Key, file.mimetype, true);
+    return { storagePath: r2Key, r2Key, usingR2: true };
+  }
+
+  return { storagePath: file.path, r2Key: null, usingR2: false };
 }
 
 export function getFileUrl(submissionId: string): string {

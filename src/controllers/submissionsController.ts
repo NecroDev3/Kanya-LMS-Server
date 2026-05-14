@@ -5,7 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { query, queryOne, execute, sqlNow } from '../config/database.js';
 import { AuthRequest, Submission, SubmissionResponse, Student, User, ErrorCodes, SubmissionStatus } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
-import { deleteFile, getFileUrl, resolveUploadPath } from '../utils/fileUpload.js';
+import { deleteFile, getFileUrl, resolveUploadPath, storeUploadedFile } from '../utils/fileUpload.js';
+import { isR2Enabled, deleteFromR2, streamFromR2 } from '../config/storage.js';
 
 // Helper to convert DB submission to API response
 function toSubmissionResponse(submission: Submission & { student_name?: string; reviewer_name?: string }): SubmissionResponse {
@@ -199,6 +200,9 @@ export async function createSubmission(req: AuthRequest, res: Response, next: Ne
       throw new AppError('Student not found', 404, ErrorCodes.NOT_FOUND);
     }
 
+    // Store file (R2 or disk)
+    const { storagePath } = await storeUploadedFile(file!, 'submissions');
+
     // Create submission
     const id = uuidv4();
     await execute(
@@ -211,7 +215,7 @@ export async function createSubmission(req: AuthRequest, res: Response, next: Ne
         description.trim(),
         file!.originalname,
         file!.size,
-        file!.path,
+        storagePath,
         file!.mimetype,
       ]
     );
@@ -343,8 +347,12 @@ export async function deleteSubmission(req: AuthRequest, res: Response, next: Ne
       }
     }
 
-    // Delete file
-    deleteFile(existing.file_path);
+    // Delete file from R2 or disk
+    if (isR2Enabled) {
+      await deleteFromR2(existing.file_path);
+    } else {
+      deleteFile(existing.file_path);
+    }
 
     // Delete submission
     await execute('DELETE FROM submissions WHERE id = ?', [id]);
@@ -378,12 +386,15 @@ export async function downloadSubmission(req: AuthRequest, res: Response, next: 
       throw new AppError('You do not have permission to download this file', 403, ErrorCodes.FORBIDDEN);
     }
 
-    const safePath = resolveUploadPath(submission.file_path);
+    if (isR2Enabled) {
+      await streamFromR2(submission.file_path, res, submission.file_name, submission.file_mime_type || 'application/octet-stream');
+      return;
+    }
 
+    const safePath = resolveUploadPath(submission.file_path);
     if (!fs.existsSync(safePath)) {
       throw new AppError('File not found', 404, ErrorCodes.NOT_FOUND);
     }
-
     res.setHeader('Content-Type', submission.file_mime_type || 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${submission.file_name}"`);
     res.sendFile(safePath);
