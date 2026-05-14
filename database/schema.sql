@@ -173,3 +173,26 @@ CREATE TABLE IF NOT EXISTS quiz_completions (
 CREATE INDEX IF NOT EXISTS idx_quizzes_course ON quizzes(course_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_completions_user ON quiz_completions(user_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_completions_quiz ON quiz_completions(quiz_id);
+
+-- ── Attendance ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS attendance_sessions (
+  id TEXT PRIMARY KEY,
+  course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  session_date TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_sessions_course ON attendance_sessions(course_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_sessions_date  ON attendance_sessions(session_date);
+
+CREATE TABLE IF NOT EXISTS attendance_records (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  marked_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (session_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_records_session ON attendance_records(session_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_records_student ON attendance_records(student_id);

@@ -20,6 +20,7 @@ import usersRoutes from './routes/users.js';
 import quizzesRoutes from './routes/quizzes.js';
 import invitesRoutes from './routes/invites.js';
 import announcementsRoutes from './routes/announcements.js';
+import attendanceRoutes from './routes/attendance.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
 dotenv.config();
@@ -168,6 +169,7 @@ app.use('/api/v1/users', apiLimiter, usersRoutes);
 app.use('/api/v1/quizzes', apiLimiter, quizzesRoutes);
 app.use('/api/v1', apiLimiter, invitesRoutes);
 app.use('/api/v1/announcements', apiLimiter, announcementsRoutes);
+app.use('/api/v1/attendance',   apiLimiter, attendanceRoutes);
 
 // Serve uploaded avatars (and other uploads) as static files
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve(process.cwd(), 'uploads');

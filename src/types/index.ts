@@ -267,6 +267,45 @@ export interface DashboardAnalytics {
   }>;
 }
 
+// ── Attendance Types ──────────────────────────────────────────────────────────
+export interface AttendanceSession {
+  id: string;
+  course_id: string;
+  title: string;
+  session_date: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AttendanceRecord {
+  id: string;
+  session_id: string;
+  student_id: string;
+  marked_at: string;
+}
+
+export interface AttendanceSessionResponse {
+  id: string;
+  courseId: string;
+  courseName: string;
+  title: string;
+  sessionDate: string;
+  createdBy: string | null;
+  createdAt: string;
+  totalStudents: number;
+  markedCount: number;
+  markedByMe?: boolean;
+}
+
+export interface AttendanceRecordResponse {
+  id: string;
+  studentId: string;
+  studentName: string;
+  enrollmentNumber: string;
+  markedAt: string;
+}
+
 // Error Codes
 export const ErrorCodes = {
   UNAUTHORIZED: 'UNAUTHORIZED',

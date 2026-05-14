@@ -214,3 +214,26 @@ CREATE TABLE IF NOT EXISTS conversation_reads (
   PRIMARY KEY (user_id, conversation_id)
 );
 CREATE INDEX IF NOT EXISTS idx_conv_reads_user ON conversation_reads(user_id);
+
+-- ── Attendance ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS attendance_sessions (
+  id TEXT PRIMARY KEY,
+  course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  session_date DATE NOT NULL,
+  created_by TEXT REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_sessions_course ON attendance_sessions(course_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_sessions_date  ON attendance_sessions(session_date);
+
+CREATE TABLE IF NOT EXISTS attendance_records (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  marked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (session_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_records_session ON attendance_records(session_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_records_student ON attendance_records(student_id);
