@@ -106,10 +106,10 @@ export async function listSessions(req: AuthRequest, res: Response, next: NextFu
 
     rows = await query<SessionRow>(
       SESSION_SELECT +
-      ` JOIN student_courses sc ON sc.course_code = (SELECT code FROM courses WHERE id = s.course_id)
-        WHERE sc.student_id = ?
+      ` JOIN user_course_codes ucc ON ucc.course_code = (SELECT course_code FROM courses WHERE id = s.course_id)
+        WHERE ucc.user_id = ?
         ORDER BY s.session_date DESC, s.created_at DESC`,
-      [studentRow.id]
+      [userId]
     );
 
     // Attach markedByMe
@@ -200,10 +200,10 @@ export async function markAttendance(req: AuthRequest, res: Response, next: Next
 
     // Check student is enrolled in this course
     const enrolled = await queryOne<{ course_code: string }>(
-      `SELECT sc.course_code FROM student_courses sc
-       JOIN courses c ON c.code = sc.course_code
-       WHERE sc.student_id = ? AND c.id = ?`,
-      [studentRow.id, session.course_id]
+      `SELECT ucc.course_code FROM user_course_codes ucc
+       JOIN courses c ON c.course_code = ucc.course_code
+       WHERE ucc.user_id = ? AND c.id = ?`,
+      [userId, session.course_id]
     );
     if (!enrolled) throw new AppError('You are not enrolled in this course', 403, ErrorCodes.FORBIDDEN);
 
@@ -268,7 +268,7 @@ const SESSION_SELECT = `
     s.*,
     c.title AS course_name,
     u.name  AS creator_name,
-    (SELECT COUNT(*) FROM student_courses sc2 JOIN courses c2 ON c2.code = sc2.course_code WHERE c2.id = s.course_id) AS total_students,
+    (SELECT COUNT(*) FROM user_course_codes ucc2 WHERE ucc2.course_code = (SELECT course_code FROM courses WHERE id = s.course_id)) AS total_students,
     (SELECT COUNT(*) FROM attendance_records ar2 WHERE ar2.session_id = s.id) AS marked_count
   FROM attendance_sessions s
   JOIN courses c ON c.id = s.course_id
