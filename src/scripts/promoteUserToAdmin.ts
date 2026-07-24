@@ -1,6 +1,8 @@
 /**
- * Set a user's role to admin by email.
- * Use after the user exists in `users` (e.g. first Clerk sign-in).
+ * Set a user's role to admin by email. The user must already exist in `users`.
+ * Note: admins are program-scoped — assign a program via the Admins UI or by
+ * setting users.program_id after promotion. Super admins are seeded separately
+ * (npm run db:seed-superadmin).
  *
  * Usage:
  *   npm run db:promote-admin -- user@example.com
@@ -31,9 +33,7 @@ async function main(): Promise<void> {
     [email]
   );
   if (!row) {
-    console.error(
-      `No user with email "${email}". Sign in once with Clerk so a row is created, then run this again.`
-    );
+    console.error(`No user with email "${email}". Create the account first, then run this again.`);
     process.exit(1);
   }
 

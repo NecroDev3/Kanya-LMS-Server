@@ -5,13 +5,13 @@ export function makeToken(overrides: {
   userId: string;
   email: string;
   role: UserRole;
-  studentId?: string;
+  programId?: string | null;
 }): string {
   const payload: JWTPayload = {
     userId: overrides.userId,
     email: overrides.email,
     role: overrides.role,
-    studentId: overrides.studentId,
+    programId: overrides.programId ?? null,
   };
   return generateToken(payload);
 }

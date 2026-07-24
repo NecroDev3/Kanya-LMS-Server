@@ -1,7 +1,9 @@
 import { Request } from 'express';
 
 // User Types
-export type UserRole = 'student' | 'admin';
+// Admin-only access model: the only account holders are super admins and
+// program-scoped admins. There is no student login.
+export type UserRole = 'super_admin' | 'admin';
 
 export interface User {
   id: string;
@@ -9,6 +11,8 @@ export interface User {
   email: string;
   password_hash: string;
   role: UserRole;
+  /** Assigned program (single). Null/ignored for super_admin, required for admin. */
+  program_id?: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -18,18 +22,22 @@ export interface UserResponse {
   name: string;
   email: string;
   role: UserRole;
-  courseCodes?: string[];
+  programId?: string | null;
 }
 
-// Student Types
+export type StudentStatus = 'active' | 'archived';
+
+// Student Types — students are managed records only (no login).
 export interface Student {
   id: string;
   user_id?: string;
+  program_id?: string | null;
   name: string;
   email: string;
   enrollment_number: string;
   department: string;
   semester: number;
+  status?: StudentStatus;
   created_at: Date;
   updated_at: Date;
 }
@@ -37,11 +45,13 @@ export interface Student {
 export interface StudentResponse {
   id: string;
   userId?: string;
+  programId?: string | null;
   name: string;
   email: string;
   enrollmentNumber: string;
   department: string;
   semester: number;
+  status?: StudentStatus;
   createdAt: string;
   updatedAt?: string;
 }
@@ -95,7 +105,8 @@ export interface JWTPayload {
   userId: string;
   email: string;
   role: UserRole;
-  studentId?: string;
+  /** Assigned program for admins. Undefined/null for super_admin. */
+  programId?: string | null;
 }
 
 // Extended Request Type
@@ -137,7 +148,8 @@ export interface CourseDocument {
   file_size: number;
   file_path: string;
   file_mime_type?: string;
-  course_ids?: string | null; // JSON array of course IDs; empty/null = open to all
+  course_ids?: string | null; // legacy JSON array of course IDs; empty/null = open to all
+  program_id?: string | null; // program (courses.id) this material belongs to
   uploaded_by_id: string;
   uploaded_at: Date;
   created_at: Date;
@@ -156,6 +168,7 @@ export interface CourseDocumentResponse {
   fileUrl: string;
   fileMimeType?: string;
   courseIds?: string[];
+  programId?: string | null;
   uploadedBy: string;
   uploadedById: string;
   uploadedAt: string;
@@ -221,6 +234,8 @@ export interface Course {
   description?: string;
   courseCode: string;
   sections: CourseSection[];
+  archived?: boolean;
+  archivedAt?: string | null;
 }
 
 // Messages API Types (BACKEND_UPDATE_REQUIREMENTS)
@@ -248,62 +263,110 @@ export interface UserDirectoryItem {
   courseCodes?: string[];
 }
 
-// Analytics Types
+// Analytics Types (admin-only, program-scoped)
 export interface DashboardAnalytics {
+  totalPrograms: number;
   totalStudents: number;
-  totalSubmissions: number;
-  submissionsByStatus: {
-    pending: number;
-    approved: number;
-    rejected: number;
+  totalQuestionnaires: number;
+  totalProgressReports: number;
+  studentsByStatus: {
+    active: number;
+    archived: number;
   };
   studentsByDepartment: Array<{ department: string; count: number }>;
-  recentSubmissions: Array<{
+  recentStudents: Array<{
     id: string;
-    studentName: string;
-    title: string;
-    status: SubmissionStatus;
-    submittedAt: string;
+    name: string;
+    enrollmentNumber: string;
+    department: string;
+    createdAt: string;
   }>;
 }
 
-// ── Attendance Types ──────────────────────────────────────────────────────────
-export interface AttendanceSession {
+// ── Attendance Registers ────────────────────────────────────────────────────────
+// An attendance register is an uploaded, signed in-person form covering a date range.
+export interface AttendanceRegister {
   id: string;
-  course_id: string;
+  program_id: string;
   title: string;
-  session_date: string;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
+  date_from: string;
+  date_to: string;
+  file_name: string;
+  file_size: number;
+  file_path: string;
+  file_mime_type?: string;
+  uploaded_by_id: string;
+  uploaded_at: Date;
+  created_at: Date;
+  updated_at: Date;
+  // Joined
+  program_name?: string;
+  uploader_name?: string;
 }
 
-export interface AttendanceRecord {
+export interface AttendanceRegisterResponse {
   id: string;
-  session_id: string;
+  programId: string;
+  programName?: string;
+  title: string;
+  dateFrom: string;
+  dateTo: string;
+  fileName: string;
+  fileSize: number;
+  fileUrl: string;
+  fileMimeType?: string;
+  uploadedBy?: string;
+  uploadedById: string;
+  uploadedAt: string;
+}
+
+// ── Progress Reports ───────────────────────────────────────────────────────────
+// Program-level review write-ups uploaded by an admin for a given month/year.
+export interface ProgressReport {
+  id: string;
+  program_id: string;
+  title: string;
+  description: string | null;
+  period_month: number;
+  period_year: number;
+  file_name: string;
+  file_size: number;
+  file_path: string;
+  file_mime_type?: string;
+  uploaded_by_id: string;
+  uploaded_at: Date;
+  created_at: Date;
+  updated_at: Date;
+  // Joined
+  program_name?: string;
+  uploader_name?: string;
+}
+
+export interface ProgressReportResponse {
+  id: string;
+  programId: string;
+  title: string;
+  description: string | null;
+  periodMonth: number;
+  periodYear: number;
+  fileName: string;
+  fileSize: number;
+  fileUrl: string;
+  fileMimeType?: string;
+  uploadedBy?: string;
+  uploadedById: string;
+  uploadedAt: string;
+}
+
+// ── Questionnaire assignments (link a questionnaire/quiz to a student) ──────────
+export interface QuestionnaireAssignment {
+  id: string;
+  quiz_id: string;
   student_id: string;
-  marked_at: string;
-}
-
-export interface AttendanceSessionResponse {
-  id: string;
-  courseId: string;
-  courseName: string;
-  title: string;
-  sessionDate: string;
-  createdBy: string | null;
-  createdAt: string;
-  totalStudents: number;
-  markedCount: number;
-  markedByMe?: boolean;
-}
-
-export interface AttendanceRecordResponse {
-  id: string;
-  studentId: string;
-  studentName: string;
-  enrollmentNumber: string;
-  markedAt: string;
+  assigned_by_id: string | null;
+  assigned_at: Date;
+  // Joined
+  student_name?: string;
 }
 
 // Error Codes

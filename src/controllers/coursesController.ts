@@ -1,9 +1,16 @@
 import { Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import bcrypt from 'bcryptjs';
 import { query, queryOne, execute } from '../config/database.js';
-import { AuthRequest, Course, CourseSection, CourseItem, UserDirectoryItem, ErrorCodes } from '../types/index.js';
+import { AuthRequest, Course, CourseSection, ErrorCodes, User } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { getDocumentFileUrl } from '../utils/fileUpload.js';
+import { isSuperAdmin, assertProgramAccess } from '../utils/programScope.js';
+
+/**
+ * A "Program" is a row in the `courses` table. The physical table name is kept
+ * to reuse existing scoping plumbing; the API is exposed under /programs.
+ */
 
 interface CourseRow {
   id: string;
@@ -11,15 +18,11 @@ interface CourseRow {
   description: string | null;
   course_code: string;
   sections: string;
+  archived?: number | boolean | null;
+  archived_at?: string | null;
 }
 
-async function getUserCourseCodes(userId: string): Promise<string[]> {
-  const rows = await query<{ course_code: string }>(
-    'SELECT course_code FROM user_course_codes WHERE user_id = ?',
-    [userId]
-  );
-  return rows.map((r) => r.course_code);
-}
+const COURSE_COLUMNS = 'id, title, description, course_code, sections, archived, archived_at';
 
 function parseSections(sectionsJson: string): CourseSection[] {
   try {
@@ -50,37 +53,36 @@ function rowToCourse(row: CourseRow): Course {
     description: row.description ?? undefined,
     courseCode: row.course_code,
     sections,
+    archived: Boolean(row.archived),
+    archivedAt: row.archived_at ?? null,
   };
 }
 
 export async function getCourses(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const isAdmin = req.user?.role === 'admin';
     let rows: CourseRow[];
-    if (isAdmin) {
-      rows = await query<CourseRow>('SELECT id, title, description, course_code, sections FROM courses ORDER BY title');
+    if (isSuperAdmin(req)) {
+      rows = await query<CourseRow>(
+        `SELECT ${COURSE_COLUMNS} FROM courses ORDER BY archived, title`
+      );
     } else {
-      const userId = req.user?.userId;
-      if (!userId) {
-        throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-      }
-      const codes = await getUserCourseCodes(userId);
-      if (codes.length === 0) {
+      const programId = req.user?.programId;
+      if (!programId) {
         rows = [];
       } else {
-        const placeholders = codes.map(() => '?').join(',');
         rows = await query<CourseRow>(
-          `SELECT id, title, description, course_code, sections FROM courses WHERE course_code IN (${placeholders}) ORDER BY title`,
-          codes
+          `SELECT ${COURSE_COLUMNS} FROM courses WHERE id = ? ORDER BY title`,
+          [programId]
         );
       }
     }
     const courses = rows.map(rowToCourse);
     res.json({
       success: true,
-      data: { courses },
-      // Duplicate for frontend compatibility: some clients read response.data.courses (e.g. axios)
+      data: { courses, programs: courses },
+      // Duplicated at top-level for older clients reading response.data.courses
       courses,
+      programs: courses,
     });
   } catch (error) {
     next(error);
@@ -90,22 +92,16 @@ export async function getCourses(req: AuthRequest, res: Response, next: NextFunc
 export async function getCourse(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    const userId = req.user?.userId;
-    const isAdmin = req.user?.role === 'admin';
-    const row = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
+    const row = await queryOne<CourseRow>(
+      `SELECT ${COURSE_COLUMNS} FROM courses WHERE id = ?`,
+      [id]
+    );
     if (!row) {
-      throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
+      throw new AppError('Program not found', 404, ErrorCodes.NOT_FOUND);
     }
-    if (!isAdmin && userId) {
-      const codes = await getUserCourseCodes(userId);
-      if (!codes.includes(row.course_code)) {
-        throw new AppError('You do not have access to this course', 403, ErrorCodes.FORBIDDEN);
-      }
-    }
-    res.json({
-      success: true,
-      data: rowToCourse(row),
-    });
+    // Direct-ID access outside an admin's program returns 403.
+    assertProgramAccess(req, row.id);
+    res.json({ success: true, data: rowToCourse(row) });
   } catch (error) {
     next(error);
   }
@@ -160,11 +156,11 @@ export async function createCourse(req: AuthRequest, res: Response, next: NextFu
 
     const existing = await queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [course.id]);
     if (existing) {
-      throw new AppError('A course with this id already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
+      throw new AppError('A program with this id already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
     }
     const codeExists = await queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ?', [course.courseCode]);
     if (codeExists) {
-      throw new AppError('A course with this courseCode already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
+      throw new AppError('A program with this courseCode already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
     }
 
     await execute(
@@ -172,15 +168,12 @@ export async function createCourse(req: AuthRequest, res: Response, next: NextFu
       [course.id, course.title, course.description ?? null, course.courseCode, JSON.stringify(course.sections)]
     );
 
-    const row = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [course.id]);
+    const row = await queryOne<CourseRow>(`SELECT ${COURSE_COLUMNS} FROM courses WHERE id = ?`, [course.id]);
     if (!row) {
-      throw new AppError('Failed to create course', 500, ErrorCodes.INTERNAL_ERROR);
+      throw new AppError('Failed to create program', 500, ErrorCodes.INTERNAL_ERROR);
     }
 
-    res.status(201).json({
-      success: true,
-      data: rowToCourse(row),
-    });
+    res.status(201).json({ success: true, data: rowToCourse(row) });
   } catch (error) {
     next(error);
   }
@@ -189,9 +182,9 @@ export async function createCourse(req: AuthRequest, res: Response, next: NextFu
 export async function updateCourse(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    const existing = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
+    const existing = await queryOne<CourseRow>(`SELECT ${COURSE_COLUMNS} FROM courses WHERE id = ?`, [id]);
     if (!existing) {
-      throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
+      throw new AppError('Program not found', 404, ErrorCodes.NOT_FOUND);
     }
 
     const o = (req.body || {}) as Record<string, unknown>;
@@ -221,7 +214,7 @@ export async function updateCourse(req: AuthRequest, res: Response, next: NextFu
       courseCode = normalizeCourseCode(String(o.courseCode));
       const codeExists = await queryOne<{ id: string }>('SELECT id FROM courses WHERE course_code = ? AND id != ?', [courseCode, id]);
       if (codeExists) {
-        throw new AppError('A course with this courseCode already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
+        throw new AppError('A program with this courseCode already exists', 400, ErrorCodes.DUPLICATE_ENTRY);
       }
     }
     const sections = o.sections !== undefined ? (o.sections as CourseSection[]) : parseSections(existing.sections);
@@ -234,11 +227,38 @@ export async function updateCourse(req: AuthRequest, res: Response, next: NextFu
       id,
     ]);
 
-    const row = await queryOne<CourseRow>('SELECT id, title, description, course_code, sections FROM courses WHERE id = ?', [id]);
-    res.json({
-      success: true,
-      data: rowToCourse(row!),
-    });
+    const row = await queryOne<CourseRow>(`SELECT ${COURSE_COLUMNS} FROM courses WHERE id = ?`, [id]);
+    res.json({ success: true, data: rowToCourse(row!) });
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function setArchived(req: AuthRequest, res: Response, archived: boolean): Promise<void> {
+  const { id } = req.params;
+  const existing = await queryOne<CourseRow>(`SELECT ${COURSE_COLUMNS} FROM courses WHERE id = ?`, [id]);
+  if (!existing) {
+    throw new AppError('Program not found', 404, ErrorCodes.NOT_FOUND);
+  }
+  await execute(
+    'UPDATE courses SET archived = ?, archived_at = ? WHERE id = ?',
+    [archived ? 1 : 0, archived ? new Date().toISOString() : null, id]
+  );
+  const row = await queryOne<CourseRow>(`SELECT ${COURSE_COLUMNS} FROM courses WHERE id = ?`, [id]);
+  res.json({ success: true, data: rowToCourse(row!) });
+}
+
+export async function archiveCourse(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    await setArchived(req, res, true);
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function unarchiveCourse(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    await setArchived(req, res, false);
   } catch (error) {
     next(error);
   }
@@ -247,154 +267,31 @@ export async function updateCourse(req: AuthRequest, res: Response, next: NextFu
 export async function deleteCourse(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
+    const password = (req.body as Record<string, unknown> | undefined)?.password;
+
+    // Deleting a program is destructive and cascades to its attendance registers,
+    // progress reports, etc. Require the acting super admin to re-enter their password.
+    if (!password || typeof password !== 'string') {
+      throw new AppError('Password confirmation is required to delete a program', 400, ErrorCodes.VALIDATION_ERROR);
+    }
+
+    const actingUser = await queryOne<User>('SELECT * FROM users WHERE id = ?', [req.user!.userId]);
+    if (!actingUser) {
+      throw new AppError('Authenticated user not found', 401, ErrorCodes.UNAUTHORIZED);
+    }
+    const passwordValid = await bcrypt.compare(password, actingUser.password_hash);
+    if (!passwordValid) {
+      throw new AppError('Incorrect password. Program was not deleted.', 403, ErrorCodes.INVALID_CREDENTIALS);
+    }
+
     const existing = await queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [id]);
     if (!existing) {
-      throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
+      throw new AppError('Program not found', 404, ErrorCodes.NOT_FOUND);
     }
+
+    // Detach any admins scoped to this program so we don't leave dangling program_id refs.
+    await execute('UPDATE users SET program_id = NULL WHERE program_id = ?', [id]);
     await execute('DELETE FROM courses WHERE id = ?', [id]);
-    res.json({ success: true });
-  } catch (error) {
-    next(error);
-  }
-}
-
-// --- Course members (Course members & user directory API) ---
-
-async function assertCanAccessCourse(courseId: string, userId: string, isAdmin: boolean): Promise<boolean> {
-  if (isAdmin) return true;
-  const course = await queryOne<{ course_code: string }>('SELECT course_code FROM courses WHERE id = ?', [courseId]);
-  if (!course) return false;
-  const hasCode = await queryOne<{ user_id: string }>(
-    'SELECT user_id FROM user_course_codes WHERE user_id = ? AND course_code = ?',
-    [userId, course.course_code]
-  );
-  return !!hasCode;
-}
-
-export async function getCourseMembers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    const isAdmin = req.user?.role === 'admin';
-    if (!userId) {
-      throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-    }
-
-    const { id: courseId } = req.params;
-    const course = await queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
-    if (!course) {
-      throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
-    }
-    if (!(await assertCanAccessCourse(courseId, userId, isAdmin))) {
-      throw new AppError('You do not have access to this course', 403, ErrorCodes.FORBIDDEN);
-    }
-
-    const rows = await query<{ id: string; name: string; email: string; role: string }>(
-      `SELECT u.id, u.name, u.email, u.role
-       FROM users u
-       INNER JOIN user_course_codes c ON c.user_id = u.id
-       WHERE c.course_code = ?
-       ORDER BY u.name`,
-      [course.course_code]
-    );
-    const members: UserDirectoryItem[] = rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      email: r.email,
-      role: r.role as UserDirectoryItem['role'],
-    }));
-
-    res.json({
-      success: true,
-      data: { members },
-    });
-  } catch (error) {
-    next(error);
-  }
-}
-
-export async function addCourseMember(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { id: courseId } = req.params;
-    const { userId: rawUserId } = req.body;
-
-    const course = await queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
-    if (!course) {
-      throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
-    }
-
-    // Resolve user: try users table first, then students table (frontend may send student.id)
-    let targetUserId = rawUserId;
-    let user = await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
-    if (!user) {
-      const student = await queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
-      if (student?.user_id) {
-        targetUserId = student.user_id;
-        user = await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId]);
-      }
-    }
-    if (!user) {
-      throw new AppError('User not found', 404, ErrorCodes.NOT_FOUND);
-    }
-
-    const existing = await queryOne<{ user_id: string }>(
-      'SELECT user_id FROM user_course_codes WHERE user_id = ? AND course_code = ?',
-      [targetUserId, course.course_code]
-    );
-    if (existing) {
-      res.json({ success: true });
-      return;
-    }
-
-    await execute('INSERT INTO user_course_codes (user_id, course_code) VALUES (?, ?)', [targetUserId, course.course_code]);
-
-    const rows = await query<{ id: string; name: string; email: string; role: string }>(
-      `SELECT u.id, u.name, u.email, u.role
-       FROM users u
-       INNER JOIN user_course_codes c ON c.user_id = u.id
-       WHERE c.course_code = ?
-       ORDER BY u.name`,
-      [course.course_code]
-    );
-    const members: UserDirectoryItem[] = rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      email: r.email,
-      role: r.role as UserDirectoryItem['role'],
-    }));
-
-    res.status(201).json({
-      success: true,
-      data: { members },
-    });
-  } catch (error) {
-    next(error);
-  }
-}
-
-export async function removeCourseMember(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { id: courseId, userId: rawUserId } = req.params;
-
-    const course = await queryOne<{ id: string; course_code: string }>('SELECT id, course_code FROM courses WHERE id = ?', [courseId]);
-    if (!course) {
-      throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
-    }
-
-    // Resolve: frontend may send student.id instead of users.id
-    let targetUserId = rawUserId;
-    if (!await queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?', [targetUserId])) {
-      const student = await queryOne<{ user_id: string }>('SELECT user_id FROM students WHERE id = ?', [targetUserId]);
-      if (student?.user_id) targetUserId = student.user_id;
-    }
-
-    const deleted = await execute(
-      'DELETE FROM user_course_codes WHERE user_id = ? AND course_code = ?',
-      [targetUserId, course.course_code]
-    );
-    if (deleted === 0) {
-      throw new AppError('Enrollment not found', 404, ErrorCodes.NOT_FOUND);
-    }
-
     res.json({ success: true });
   } catch (error) {
     next(error);

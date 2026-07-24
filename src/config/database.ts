@@ -6,6 +6,11 @@ import Database, { type Database as DatabaseType } from 'better-sqlite3';
 
 dotenv.config();
 
+// Return Postgres DATE (OID 1082) columns as plain 'YYYY-MM-DD' strings instead of
+// JS Date objects, which would otherwise be timezone-shifted when serialized to JSON.
+// SQLite already stores these as TEXT, so this keeps date handling consistent.
+pg.types.setTypeParser(1082, (v: string) => v);
+
 const databaseUrl = process.env.DATABASE_URL?.trim();
 
 export const isPostgres = Boolean(databaseUrl);
@@ -55,6 +60,18 @@ function runSqliteEnsures(db: DatabaseType): void {
       db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name)
     );
 
+  // Add a column only if missing. Tolerates the "duplicate column" race that can
+  // happen when multiple processes (e.g. parallel test workers) open the same DB.
+  const addColumn = (table: string, column: string, ddl: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (cols.some((c) => c.name === column)) return;
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    } catch (e) {
+      if (!/duplicate column name/i.test((e as Error).message)) throw e;
+    }
+  };
+
   if (!hasTable('user_course_codes')) {
     db.exec(`
       CREATE TABLE user_course_codes (
@@ -68,13 +85,94 @@ function runSqliteEnsures(db: DatabaseType): void {
   }
 
   if (hasTable('users')) {
-    const cols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
-    if (!cols.some((c) => c.name === 'clerk_user_id')) {
-      db.exec('ALTER TABLE users ADD COLUMN clerk_user_id TEXT');
-    }
-    db.exec(
-      'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_clerk_user_id ON users(clerk_user_id) WHERE clerk_user_id IS NOT NULL'
-    );
+    addColumn('users', 'program_id', 'program_id TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_users_program ON users(program_id)');
+  }
+
+  if (hasTable('students')) {
+    addColumn('students', 'program_id', 'program_id TEXT');
+    addColumn('students', 'status', "status TEXT NOT NULL DEFAULT 'active'");
+    db.exec('CREATE INDEX IF NOT EXISTS idx_students_program ON students(program_id)');
+  }
+
+  if (hasTable('course_documents')) {
+    addColumn('course_documents', 'program_id', 'program_id TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_documents_program ON course_documents(program_id)');
+  }
+
+  if (hasTable('courses')) {
+    addColumn('courses', 'archived', 'archived INTEGER NOT NULL DEFAULT 0');
+    addColumn('courses', 'archived_at', 'archived_at TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_courses_archived ON courses(archived)');
+  }
+
+  // Attendance registers: an uploaded signed in-person register covering a date range.
+  if (!hasTable('attendance_registers')) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS attendance_registers (
+        id TEXT PRIMARY KEY,
+        program_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        date_from TEXT NOT NULL,
+        date_to TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        file_path TEXT NOT NULL,
+        file_mime_type TEXT,
+        uploaded_by_id TEXT NOT NULL REFERENCES users(id),
+        uploaded_at TEXT DEFAULT (datetime('now')),
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_attendance_registers_program ON attendance_registers(program_id);
+      CREATE INDEX IF NOT EXISTS idx_attendance_registers_dates ON attendance_registers(date_from, date_to);
+    `);
+  }
+
+  // Progress reports are now program-level (title, month/year, file) — no student link.
+  // Recreate the legacy student-linked table if present (safe: the feature carried no data).
+  const progressIsLegacy =
+    hasTable('progress_reports') &&
+    !(db.prepare('PRAGMA table_info(progress_reports)').all() as { name: string }[]).some((c) => c.name === 'period_year');
+  if (progressIsLegacy) {
+    db.exec('DROP TABLE progress_reports');
+  }
+  if (!hasTable('progress_reports')) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS progress_reports (
+        id TEXT PRIMARY KEY,
+        program_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        description TEXT,
+        period_month INTEGER NOT NULL,
+        period_year INTEGER NOT NULL,
+        file_name TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        file_path TEXT NOT NULL,
+        file_mime_type TEXT,
+        uploaded_by_id TEXT NOT NULL REFERENCES users(id),
+        uploaded_at TEXT DEFAULT (datetime('now')),
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_progress_reports_program ON progress_reports(program_id);
+      CREATE INDEX IF NOT EXISTS idx_progress_reports_period ON progress_reports(period_year, period_month);
+    `);
+  }
+
+  if (!hasTable('questionnaire_assignments')) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS questionnaire_assignments (
+        id TEXT PRIMARY KEY,
+        quiz_id TEXT NOT NULL REFERENCES quizzes(id) ON DELETE CASCADE,
+        student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        assigned_by_id TEXT REFERENCES users(id),
+        assigned_at TEXT DEFAULT (datetime('now')),
+        UNIQUE (quiz_id, student_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_questionnaire_assignments_quiz ON questionnaire_assignments(quiz_id);
+      CREATE INDEX IF NOT EXISTS idx_questionnaire_assignments_student ON questionnaire_assignments(student_id);
+    `);
   }
 
   if (!hasTable('announcements')) {

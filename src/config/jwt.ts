@@ -4,11 +4,18 @@ import { JWTPayload } from '../types/index.js';
 
 dotenv.config();
 
-if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
-  throw new Error('JWT_SECRET environment variable is required in production');
+// JWT_SECRET is required in every real environment. The only exception is the
+// automated test runner (NODE_ENV=test), which uses an ephemeral in-memory secret.
+const isTest = process.env.NODE_ENV === 'test';
+const configuredSecret = process.env.JWT_SECRET?.trim();
+
+if (!configuredSecret && !isTest) {
+  throw new Error(
+    'JWT_SECRET environment variable is required. Set a strong, random secret before starting the server.'
+  );
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-insecure-secret';
+const JWT_SECRET = configuredSecret || 'test-only-ephemeral-secret';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
 export function generateToken(payload: JWTPayload): string {

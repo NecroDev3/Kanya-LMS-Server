@@ -1,14 +1,26 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import app from './app.js';
-import { testConnection, close } from './config/database.js';
+import { validateEnv } from './config/env.js';
 
 const PORT = process.env.PORT || 3001;
 
+// Populated after the environment is validated (see startServer).
+let close: () => Promise<void> = async () => {};
+
 async function startServer(): Promise<void> {
   try {
-    await testConnection();
+    // Fail fast on a misconfigured environment before importing app/db (whose module
+    // side effects assume valid config) or binding a port.
+    validateEnv();
+
+    const [{ default: app }, dbModule] = await Promise.all([
+      import('./app.js'),
+      import('./config/database.js'),
+    ]);
+    close = dbModule.close;
+
+    await dbModule.testConnection();
     console.log('✅ Database connected successfully');
 
     app.listen(PORT, () => {

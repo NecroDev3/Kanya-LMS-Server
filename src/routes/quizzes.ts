@@ -5,24 +5,26 @@ import {
   createQuiz,
   updateQuiz,
   deleteQuiz,
-  getCompletionsForUser,
-  getCompletion,
-  submitQuiz,
+  getAssignments,
+  assignStudents,
+  removeAssignment,
 } from '../controllers/quizzesController.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { authenticate, authorize, requireSuperAdmin } from '../middleware/auth.js';
 
 const router = Router();
 
 router.use(authenticate);
-
-router.get('/completions', getCompletionsForUser);
-router.get('/:id/completion', getCompletion);
-router.post('/:id/submit', submitQuiz);
+router.use(authorize('super_admin', 'admin'));
 
 router.get('/', listQuizzes);
-router.post('/', authorize('admin'), createQuiz);
+router.post('/', createQuiz);
 router.get('/:id', getQuiz);
-router.put('/:id', authorize('admin'), updateQuiz);
-router.delete('/:id', authorize('admin'), deleteQuiz);
+router.put('/:id', updateQuiz);
+router.delete('/:id', requireSuperAdmin, deleteQuiz);
+
+// Assignments: link a questionnaire to specific students in its program.
+router.get('/:id/assignments', getAssignments);
+router.post('/:id/assignments', assignStudents);
+router.delete('/:id/assignments/:studentId', removeAssignment);
 
 export default router;

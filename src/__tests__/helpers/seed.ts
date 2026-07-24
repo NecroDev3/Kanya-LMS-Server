@@ -8,48 +8,81 @@ const HASH = bcrypt.hashSync(PASSWORD, 4); // low rounds for speed in tests
 export const TEST_PASSWORD = PASSWORD;
 
 export interface TestIds {
+  superAdminId: string;
+  /** Admin scoped to program 1 */
   adminId: string;
-  studentUserId: string;
-  studentId: string;
-  courseId: string;
-  courseCode: string;
-  course2Id: string;
-  course2Code: string;
-  documentId: string;
+  /** Admin scoped to program 2 */
+  admin2Id: string;
+  programId: string; // program 1 (courses.id)
+  programCode: string;
+  program2Id: string; // program 2
+  program2Code: string;
+  studentId: string; // in program 1
+  student2Id: string; // in program 2
+  documentId: string; // in program 1
+  document2Id: string; // in program 2
+  quizId: string; // in program 1
 }
 
+/**
+ * Seeds a two-program world:
+ *  - 1 super admin (no program)
+ *  - admin (program 1), admin2 (program 2)
+ *  - a student, a document and a quiz in each program
+ * Used to verify program scoping and delete gating.
+ */
 export function seedTestData(): TestIds {
+  const superAdminId = uuidv4();
   const adminId = uuidv4();
-  const studentUserId = uuidv4();
+  const admin2Id = uuidv4();
+  const programId = uuidv4();
+  const programCode = 'BLOCK-101';
+  const program2Id = uuidv4();
+  const program2Code = 'WEB-201';
   const studentId = uuidv4();
-  const courseId = uuidv4();
-  const courseCode = 'BLOCK-101';
-  const course2Id = uuidv4();
-  const course2Code = 'WEB-201';
+  const student2Id = uuidv4();
   const documentId = uuidv4();
+  const document2Id = uuidv4();
+  const quizId = uuidv4();
 
   db.exec(`
-    INSERT INTO users (id, name, email, password_hash, role)
-    VALUES
-      ('${adminId}', 'Admin User', 'admin@test.com', '${HASH}', 'admin'),
-      ('${studentUserId}', 'Student User', 'student@test.com', '${HASH}', 'student');
-
-    INSERT INTO students (id, user_id, name, email, enrollment_number, department, semester)
-    VALUES ('${studentId}', '${studentUserId}', 'Student User', 'student@test.com', 'STU-001', 'Computer Science', 3);
-
     INSERT INTO courses (id, title, description, course_code, sections)
     VALUES
-      ('${courseId}', 'Blockchain 101', 'Intro to blockchain', '${courseCode}', '${JSON.stringify([
-        { id: uuidv4(), title: 'Getting Started', items: [] },
-      ])}'),
-      ('${course2Id}', 'Web Dev 201', 'Advanced web development', '${course2Code}', '[]');
+      ('${programId}', 'Blockchain 101', 'Intro to blockchain', '${programCode}', '[]'),
+      ('${program2Id}', 'Web Dev 201', 'Advanced web development', '${program2Code}', '[]');
 
-    INSERT INTO user_course_codes (user_id, course_code)
-    VALUES ('${studentUserId}', '${courseCode}');
+    INSERT INTO users (id, name, email, password_hash, role, program_id)
+    VALUES
+      ('${superAdminId}', 'Super Admin', 'super@test.com', '${HASH}', 'super_admin', NULL),
+      ('${adminId}', 'Admin One', 'admin@test.com', '${HASH}', 'admin', '${programId}'),
+      ('${admin2Id}', 'Admin Two', 'admin2@test.com', '${HASH}', 'admin', '${program2Id}');
 
-    INSERT INTO course_documents (id, title, description, category, file_name, file_size, file_path, file_mime_type, uploaded_by_id)
-    VALUES ('${documentId}', 'Lecture 1 Notes', 'First lecture notes', 'Lecture Notes', 'lecture1.pdf', 1024, '/tmp/test/lecture1.pdf', 'application/pdf', '${adminId}');
+    INSERT INTO students (id, program_id, name, email, enrollment_number, department, semester, status)
+    VALUES
+      ('${studentId}', '${programId}', 'Student One', 's1@test.com', 'STU-001', 'Computer Science', 3, 'active'),
+      ('${student2Id}', '${program2Id}', 'Student Two', 's2@test.com', 'STU-002', 'Computer Science', 3, 'active');
+
+    INSERT INTO course_documents (id, title, description, category, file_name, file_size, file_path, file_mime_type, program_id, uploaded_by_id)
+    VALUES
+      ('${documentId}', 'P1 Notes', 'Program 1 notes', 'Lecture Notes', 'p1.pdf', 1024, '/tmp/test/p1.pdf', 'application/pdf', '${programId}', '${adminId}'),
+      ('${document2Id}', 'P2 Notes', 'Program 2 notes', 'Lecture Notes', 'p2.pdf', 1024, '/tmp/test/p2.pdf', 'application/pdf', '${program2Id}', '${admin2Id}');
+
+    INSERT INTO quizzes (id, title, description, course_id, passing_score, questions)
+    VALUES ('${quizId}', 'P1 Quiz', 'Program 1 quiz', '${programId}', 70, '[]');
   `);
 
-  return { adminId, studentUserId, studentId, courseId, courseCode, course2Id, course2Code, documentId };
+  return {
+    superAdminId,
+    adminId,
+    admin2Id,
+    programId,
+    programCode,
+    program2Id,
+    program2Code,
+    studentId,
+    student2Id,
+    documentId,
+    document2Id,
+    quizId,
+  };
 }

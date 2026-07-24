@@ -1,25 +1,21 @@
 import { Router } from 'express';
 import {
-  createSession,
-  listSessions,
-  getSession,
-  markAttendance,
-  deleteSession,
-  myAttendance,
-  exportSession,
+  listRegisters,
+  createRegister,
+  downloadRegister,
+  deleteRegister,
 } from '../controllers/attendanceController.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, authorize, requireSuperAdmin } from '../middleware/auth.js';
+import { uploadDocument } from '../utils/fileUpload.js';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(authorize('super_admin', 'admin'));
 
-router.get('/my',      myAttendance);          // student: own history
-router.get('/',        listSessions);           // admin: all | student: their courses
-router.post('/',       createSession);          // admin only (enforced in controller)
-router.get('/:id',        getSession);           // admin: session + records | student: session info
-router.get('/:id/export', exportSession);       // admin: download CSV register
-router.post('/:id/mark',  markAttendance);      // student marks present
-router.delete('/:id',     deleteSession);       // admin only
+router.get('/', listRegisters);
+router.post('/', uploadDocument.single('file'), createRegister);
+router.get('/:id/download', downloadRegister);
+router.delete('/:id', requireSuperAdmin, deleteRegister);
 
 export default router;

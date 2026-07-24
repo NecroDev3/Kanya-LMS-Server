@@ -50,12 +50,9 @@ A TypeScript/Express backend server for the KanyaCSI Student Management System. 
    # Database Configuration (SQLite file path)
    DATABASE_PATH=./data/student_ms.db
 
-   # JWT Configuration
+   # JWT Configuration (this is the ONLY auth mechanism — email + password → JWT)
    JWT_SECRET=your-super-secret-key-change-this-in-production-min-32-chars
    JWT_EXPIRES_IN=24h
-
-   # Google Sign-In (optional; use same Client ID as frontend)
-   GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 
    # File Upload Configuration
    MAX_FILE_SIZE=10485760
@@ -64,34 +61,37 @@ A TypeScript/Express backend server for the KanyaCSI Student Management System. 
    # CORS Configuration
    FRONTEND_URL=http://localhost:5173
 
-   # Clerk (optional — use with Clerk-powered frontend)
-   # Secret key from Clerk Dashboard → API Keys (not the publishable key).
-   # Enables verifying Clerk session JWTs on protected routes and /auth/me.
-   CLERK_SECRET_KEY=sk_test_...
-   # Optional: comma-separated allowed origins for Clerk tokens (defaults to FRONTEND_URL)
-   # CLERK_AUTHORIZED_PARTIES=http://localhost:5173,https://yourapp.com
+   # First Super Admin (used by npm run db:seed-superadmin)
+   SUPERADMIN_EMAIL=superadmin@kanya.edu
+   SUPERADMIN_PASSWORD=change-me
    ```
 
-   **Clerk + LMS users:** On first successful Clerk sign-in, the server links by **email** to an existing `users` row (and sets `clerk_user_id`) or creates a **student** user plus a `students` row. Seed admins/students in the DB first if you need a specific role; new Clerk-only sign-ups are **students**.
+   **Auth model:** This is an **admin-only** platform with built-in auth. Accounts are
+   either `super_admin` (unrestricted) or `admin` (scoped to one program). There is no
+   student login and no self-signup — the Super Admin provisions admin accounts. All
+   data access is scoped to the caller's program on the server.
 
 4. **Initialize the database**
 
-   **Option A – SM Web Systems LMS (schema + seed two users)**  
-   If you use the schema from the `SM-Web-systems-LMS` repo and only need admin + student logins:
-
+   **Fresh database (schema + first super admin)**
    ```bash
    # From server repo; DB path = DATABASE_PATH or ./data/student_ms.db
-   npm run db:schema    # run schema once (uses database/schema.sql in this repo)
-   npm run db:seed      # seed admin@smwebsystems.com and student@smwebsystems.com
+   npm run db:schema           # create tables from database/schema.sql
+   npm run db:seed-superadmin  # create the first super_admin account
+   # optional: npm run db:seed  # demo program + a scoped admin
    ```
 
-   To use a different schema file: `SCHEMA_SQL_PATH=/path/to/schema.sql npm run db:schema`
+   **Existing database (upgrade to the admin/RBAC model)**
+   ```bash
+   npm run db:migrate-rbac     # adds program_id/status columns + new tables (Postgres)
+   npm run db:seed-superadmin
+   ```
 
-   **Option B – Full init (Kanya sample data)**  
+   **Option B – Full local init (SQLite sample data)**
    ```bash
    npm run db:init
    ```
-   This creates all tables and seeds sample data (admin@kanya.edu, john@kanya.edu, etc.).
+   This creates all tables and seeds a demo program plus super@kanya.edu / admin@kanya.edu.
 
 ## Running the Server
 

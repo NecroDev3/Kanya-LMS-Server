@@ -1,355 +1,173 @@
 import { Response, NextFunction } from 'express';
+import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne, execute, sqlNow } from '../config/database.js';
-import {
-  AuthRequest,
-  ErrorCodes,
-  AttendanceSession,
-  AttendanceRecord,
-  AttendanceSessionResponse,
-  AttendanceRecordResponse,
-} from '../types/index.js';
+import { query, queryOne, execute } from '../config/database.js';
+import { AuthRequest, ErrorCodes, AttendanceRegister, AttendanceRegisterResponse } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { deleteFile, resolveUploadPath, storeUploadedFile } from '../utils/fileUpload.js';
+import { isR2Enabled, deleteFromR2, streamFromR2 } from '../config/storage.js';
+import { programFilter, assertProgramAccess, resolveWritableProgramId } from '../utils/programScope.js';
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-interface SessionRow extends AttendanceSession {
-  course_name: string;
-  creator_name: string | null;
-  total_students: string | number;
-  marked_count: string | number;
+function fileUrl(id: string): string {
+  return `/api/v1/attendance/${id}/download`;
 }
 
-function toSessionResponse(row: SessionRow, markedByMe?: boolean): AttendanceSessionResponse {
+function toResponse(r: AttendanceRegister): AttendanceRegisterResponse {
   return {
-    id: row.id,
-    courseId: row.course_id,
-    courseName: row.course_name,
-    title: row.title,
-    sessionDate: row.session_date,
-    createdBy: row.creator_name,
-    createdAt: row.created_at,
-    totalStudents: Number(row.total_students),
-    markedCount: Number(row.marked_count),
-    markedByMe,
+    id: r.id,
+    programId: r.program_id,
+    programName: r.program_name,
+    title: r.title,
+    dateFrom: r.date_from,
+    dateTo: r.date_to,
+    fileName: r.file_name,
+    fileSize: r.file_size,
+    fileUrl: fileUrl(r.id),
+    fileMimeType: r.file_mime_type,
+    uploadedBy: r.uploader_name,
+    uploadedById: r.uploaded_by_id,
+    uploadedAt: r.uploaded_at as unknown as string,
   };
 }
 
-// today's date as YYYY-MM-DD in local time
-function todayDate(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
+const REGISTER_SELECT = `
+  SELECT ar.*, c.title AS program_name, u.name AS uploader_name
+  FROM attendance_registers ar
+  JOIN courses c ON c.id = ar.program_id
+  LEFT JOIN users u ON u.id = ar.uploaded_by_id
+`;
 
-// ── Admin: create session ─────────────────────────────────────────────────────
-
-/** POST /attendance  (admin only) */
-export async function createSession(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+// ── List registers (program-scoped) ───────────────────────────────────────────
+export async function listRegisters(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const adminId = req.user?.userId;
-    if (!adminId) throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-    if (req.user?.role !== 'admin') throw new AppError('Admin access required', 403, ErrorCodes.FORBIDDEN);
+    const conditions: string[] = [];
+    const params: unknown[] = [];
 
-    const { courseId, title, sessionDate } = req.body;
-
-    if (!courseId?.trim()) throw new AppError('courseId is required', 400, ErrorCodes.VALIDATION_ERROR);
-    if (!title?.trim()) throw new AppError('title is required', 400, ErrorCodes.VALIDATION_ERROR);
-    if (!sessionDate?.trim()) throw new AppError('sessionDate is required (YYYY-MM-DD)', 400, ErrorCodes.VALIDATION_ERROR);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate.trim())) {
-      throw new AppError('sessionDate must be in YYYY-MM-DD format', 400, ErrorCodes.VALIDATION_ERROR);
+    const scope = programFilter(req, 'ar.program_id');
+    if (scope.clause) {
+      conditions.push(scope.clause);
+      params.push(...scope.params);
     }
 
-    const course = await queryOne<{ id: string; title: string }>('SELECT id, title FROM courses WHERE id = ?', [courseId]);
-    if (!course) throw new AppError('Course not found', 404, ErrorCodes.NOT_FOUND);
+    const courseFilter = (req.query.courseId as string | undefined) || (req.query.programId as string | undefined);
+    if (courseFilter) {
+      assertProgramAccess(req, courseFilter);
+      conditions.push('ar.program_id = ?');
+      params.push(courseFilter);
+    }
+
+    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+    const rows = await query<AttendanceRegister>(
+      REGISTER_SELECT + ` ${where} ORDER BY ar.date_from DESC, ar.uploaded_at DESC`,
+      params
+    );
+    res.json({ success: true, data: rows.map(toResponse) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Upload a register (title, date range, file) ───────────────────────────────
+export async function createRegister(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const adminId = req.user?.userId;
+    const { title, dateFrom, dateTo, courseId, programId } = req.body;
+    const file = req.file;
+
+    const errors: Array<{ field: string; message: string }> = [];
+    if (!title || String(title).trim().length === 0) errors.push({ field: 'title', message: 'Title is required' });
+    if (!dateFrom || !DATE_RE.test(String(dateFrom).trim())) errors.push({ field: 'dateFrom', message: 'dateFrom is required (YYYY-MM-DD)' });
+    if (!dateTo || !DATE_RE.test(String(dateTo).trim())) errors.push({ field: 'dateTo', message: 'dateTo is required (YYYY-MM-DD)' });
+    if (dateFrom && dateTo && DATE_RE.test(String(dateFrom)) && DATE_RE.test(String(dateTo)) && String(dateTo) < String(dateFrom)) {
+      errors.push({ field: 'dateTo', message: 'dateTo must be on or after dateFrom' });
+    }
+    if (!file) errors.push({ field: 'file', message: 'File is required' });
+    if (errors.length > 0) {
+      if (file) deleteFile(file.path);
+      throw new AppError('Validation failed', 400, ErrorCodes.VALIDATION_ERROR, errors);
+    }
+
+    let targetProgramId: string;
+    try {
+      targetProgramId = resolveWritableProgramId(req, programId ?? courseId);
+    } catch (e) {
+      if (file) deleteFile(file.path);
+      throw e;
+    }
+
+    const program = await queryOne<{ id: string }>('SELECT id FROM courses WHERE id = ?', [targetProgramId]);
+    if (!program) {
+      if (file) deleteFile(file.path);
+      throw new AppError('Program not found', 404, ErrorCodes.NOT_FOUND);
+    }
+
+    const { storagePath } = await storeUploadedFile(file!, 'documents');
 
     const id = uuidv4();
     await execute(
-      `INSERT INTO attendance_sessions (id, course_id, title, session_date, created_by)
-       VALUES (?, ?, ?, ?, ?)`,
-      [id, courseId.trim(), title.trim(), sessionDate.trim(), adminId]
+      `INSERT INTO attendance_registers (id, program_id, title, date_from, date_to, file_name, file_size, file_path, file_mime_type, uploaded_by_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        targetProgramId,
+        String(title).trim(),
+        String(dateFrom).trim(),
+        String(dateTo).trim(),
+        file!.originalname,
+        file!.size,
+        storagePath,
+        file!.mimetype,
+        adminId,
+      ]
     );
 
-    const row = await queryOne<SessionRow>(SESSION_SELECT + ' WHERE s.id = ?', [id]);
-    res.status(201).json({ success: true, data: toSessionResponse(row!) });
-  } catch (err) { next(err); }
+    const row = await queryOne<AttendanceRegister>(REGISTER_SELECT + ' WHERE ar.id = ?', [id]);
+    res.status(201).json({ success: true, data: toResponse(row!) });
+  } catch (err) {
+    next(err);
+  }
 }
 
-// ── List sessions ─────────────────────────────────────────────────────────────
-
-/**
- * GET /attendance
- * Admin → all sessions (optional ?courseId= filter)
- * Student → sessions for their enrolled courses
- */
-export async function listSessions(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+// ── Download the register file (program-scoped) ───────────────────────────────
+export async function downloadRegister(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const userId = req.user?.userId;
-    if (!userId) throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-    const isAdmin = req.user?.role === 'admin';
+    const { id } = req.params;
+    const row = await queryOne<AttendanceRegister>('SELECT * FROM attendance_registers WHERE id = ?', [id]);
+    if (!row) throw new AppError('Attendance register not found', 404, ErrorCodes.NOT_FOUND);
+    assertProgramAccess(req, row.program_id);
 
-    let rows: SessionRow[];
-
-    if (isAdmin) {
-      const courseFilter = req.query.courseId as string | undefined;
-      if (courseFilter) {
-        rows = await query<SessionRow>(SESSION_SELECT + ' WHERE s.course_id = ? ORDER BY s.session_date DESC, s.created_at DESC', [courseFilter]);
-      } else {
-        rows = await query<SessionRow>(SESSION_SELECT + ' ORDER BY s.session_date DESC, s.created_at DESC');
-      }
-      res.json({ success: true, data: rows.map(r => toSessionResponse(r)) });
+    if (isR2Enabled) {
+      await streamFromR2(row.file_path, res, row.file_name, row.file_mime_type || 'application/octet-stream');
       return;
     }
-
-    // Student: only sessions for courses they're enrolled in
-    const studentRow = await queryOne<{ id: string }>('SELECT id FROM students WHERE user_id = ?', [userId]);
-    if (!studentRow) { res.json({ success: true, data: [] }); return; }
-
-    rows = await query<SessionRow>(
-      SESSION_SELECT +
-      ` JOIN user_course_codes ucc ON ucc.course_code = (SELECT course_code FROM courses WHERE id = s.course_id)
-        WHERE ucc.user_id = ?
-        ORDER BY s.session_date DESC, s.created_at DESC`,
-      [userId]
-    );
-
-    // Attach markedByMe
-    const marked = await query<{ session_id: string }>(
-      'SELECT session_id FROM attendance_records WHERE student_id = ?',
-      [studentRow.id]
-    );
-    const markedSet = new Set(marked.map(m => m.session_id));
-
-    res.json({ success: true, data: rows.map(r => toSessionResponse(r, markedSet.has(r.id))) });
-  } catch (err) { next(err); }
+    const safePath = resolveUploadPath(row.file_path);
+    if (!fs.existsSync(safePath)) throw new AppError('File not found', 404, ErrorCodes.NOT_FOUND);
+    res.setHeader('Content-Type', row.file_mime_type || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${row.file_name}"`);
+    res.setHeader('Content-Length', row.file_size);
+    res.sendFile(safePath);
+  } catch (err) {
+    next(err);
+  }
 }
 
-// ── Get single session + records (admin) / session info (student) ─────────────
-
-/** GET /attendance/:id */
-export async function getSession(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+// ── Delete register (Super Admin only via route) ──────────────────────────────
+export async function deleteRegister(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const userId = req.user?.userId;
-    if (!userId) throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-    const isAdmin = req.user?.role === 'admin';
     const { id } = req.params;
+    const row = await queryOne<AttendanceRegister>('SELECT * FROM attendance_registers WHERE id = ?', [id]);
+    if (!row) throw new AppError('Attendance register not found', 404, ErrorCodes.NOT_FOUND);
 
-    const row = await queryOne<SessionRow>(SESSION_SELECT + ' WHERE s.id = ?', [id]);
-    if (!row) throw new AppError('Attendance session not found', 404, ErrorCodes.NOT_FOUND);
-
-    if (isAdmin) {
-      const records = await query<AttendanceRecord & { student_name: string; enrollment_number: string }>(
-        `SELECT ar.*, st.name AS student_name, st.enrollment_number
-         FROM attendance_records ar
-         JOIN students st ON st.id = ar.student_id
-         WHERE ar.session_id = ?
-         ORDER BY ar.marked_at ASC`,
-        [id]
-      );
-
-      const recordResponses: AttendanceRecordResponse[] = records.map(r => ({
-        id: r.id,
-        studentId: r.student_id,
-        studentName: r.student_name,
-        enrollmentNumber: r.enrollment_number,
-        markedAt: r.marked_at,
-      }));
-
-      res.json({ success: true, data: { session: toSessionResponse(row), records: recordResponses } });
-      return;
+    if (isR2Enabled) {
+      await deleteFromR2(row.file_path);
+    } else {
+      deleteFile(row.file_path);
     }
-
-    // Student view
-    const studentRow = await queryOne<{ id: string }>('SELECT id FROM students WHERE user_id = ?', [userId]);
-    let markedByMe = false;
-    if (studentRow) {
-      const rec = await queryOne<{ id: string }>(
-        'SELECT id FROM attendance_records WHERE session_id = ? AND student_id = ?',
-        [id, studentRow.id]
-      );
-      markedByMe = Boolean(rec);
-    }
-    res.json({ success: true, data: toSessionResponse(row, markedByMe) });
-  } catch (err) { next(err); }
+    await execute('DELETE FROM attendance_registers WHERE id = ?', [id]);
+    res.json({ success: true, message: 'Attendance register deleted' });
+  } catch (err) {
+    next(err);
+  }
 }
-
-// ── Student: mark attendance ──────────────────────────────────────────────────
-
-/** POST /attendance/:id/mark */
-export async function markAttendance(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-    const { id } = req.params;
-
-    const session = await queryOne<AttendanceSession>('SELECT * FROM attendance_sessions WHERE id = ?', [id]);
-    if (!session) throw new AppError('Attendance session not found', 404, ErrorCodes.NOT_FOUND);
-
-    // Must be today
-    const today = todayDate();
-    const sessionDay = session.session_date.slice(0, 10);
-    if (sessionDay !== today) {
-      throw new AppError(
-        `Attendance can only be marked on ${sessionDay}`,
-        403,
-        ErrorCodes.FORBIDDEN
-      );
-    }
-
-    const studentRow = await queryOne<{ id: string }>('SELECT id FROM students WHERE user_id = ?', [userId]);
-    if (!studentRow) throw new AppError('Student profile not found', 403, ErrorCodes.FORBIDDEN);
-
-    // Check student is enrolled in this course
-    const enrolled = await queryOne<{ course_code: string }>(
-      `SELECT ucc.course_code FROM user_course_codes ucc
-       JOIN courses c ON c.course_code = ucc.course_code
-       WHERE ucc.user_id = ? AND c.id = ?`,
-      [userId, session.course_id]
-    );
-    if (!enrolled) throw new AppError('You are not enrolled in this course', 403, ErrorCodes.FORBIDDEN);
-
-    // Check not already marked
-    const existing = await queryOne<{ id: string }>(
-      'SELECT id FROM attendance_records WHERE session_id = ? AND student_id = ?',
-      [id, studentRow.id]
-    );
-    if (existing) throw new AppError('Attendance already marked', 400, ErrorCodes.DUPLICATE_ENTRY);
-
-    const recordId = uuidv4();
-    await execute(
-      `INSERT INTO attendance_records (id, session_id, student_id, marked_at)
-       VALUES (?, ?, ?, ${sqlNow()})`,
-      [recordId, id, studentRow.id]
-    );
-
-    res.json({ success: true, message: 'Attendance marked successfully' });
-  } catch (err) { next(err); }
-}
-
-// ── Admin: delete session ─────────────────────────────────────────────────────
-
-/** DELETE /attendance/:id */
-export async function deleteSession(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  try {
-    if (req.user?.role !== 'admin') throw new AppError('Admin access required', 403, ErrorCodes.FORBIDDEN);
-    const { id } = req.params;
-    const session = await queryOne<{ id: string }>('SELECT id FROM attendance_sessions WHERE id = ?', [id]);
-    if (!session) throw new AppError('Attendance session not found', 404, ErrorCodes.NOT_FOUND);
-    await execute('DELETE FROM attendance_sessions WHERE id = ?', [id]);
-    res.json({ success: true, message: 'Session deleted' });
-  } catch (err) { next(err); }
-}
-
-// ── Student: own attendance history ──────────────────────────────────────────
-
-/** GET /attendance/my  — student's full history */
-export async function myAttendance(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) throw new AppError('Authentication required', 401, ErrorCodes.UNAUTHORIZED);
-
-    const studentRow = await queryOne<{ id: string }>('SELECT id FROM students WHERE user_id = ?', [userId]);
-    if (!studentRow) { res.json({ success: true, data: [] }); return; }
-
-    const rows = await query<SessionRow & { marked_at: string }>(
-      SESSION_SELECT +
-      ` JOIN attendance_records ar ON ar.session_id = s.id AND ar.student_id = ?
-        ORDER BY s.session_date DESC`,
-      [studentRow.id]
-    );
-
-    res.json({ success: true, data: rows.map(r => toSessionResponse(r, true)) });
-  } catch (err) { next(err); }
-}
-
-// ── Admin: export session as CSV ──────────────────────────────────────────────
-
-/** GET /attendance/:id/export  (admin only) */
-export async function exportSession(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  try {
-    if (req.user?.role !== 'admin') throw new AppError('Admin access required', 403, ErrorCodes.FORBIDDEN);
-    const { id } = req.params;
-
-    const session = await queryOne<AttendanceSession & { course_name: string; course_code: string }>(
-      `SELECT s.*, c.title AS course_name, c.course_code
-       FROM attendance_sessions s
-       JOIN courses c ON c.id = s.course_id
-       WHERE s.id = ?`,
-      [id]
-    );
-    if (!session) throw new AppError('Attendance session not found', 404, ErrorCodes.NOT_FOUND);
-
-    // All students enrolled in this course
-    type EnrolledStudent = {
-      student_id: string;
-      name: string;
-      email: string;
-      enrollment_number: string;
-      department: string | null;
-    };
-    const enrolled = await query<EnrolledStudent>(
-      `SELECT st.id AS student_id, st.name, st.email, st.enrollment_number, st.department
-       FROM students st
-       JOIN users u ON u.id = st.user_id
-       JOIN user_course_codes ucc ON ucc.user_id = u.id
-       JOIN courses c ON c.course_code = ucc.course_code
-       WHERE c.id = ?
-       ORDER BY st.name ASC`,
-      [session.course_id]
-    );
-
-    // Attendance records for this session
-    const records = await query<{ student_id: string; marked_at: string }>(
-      'SELECT student_id, marked_at FROM attendance_records WHERE session_id = ?',
-      [id]
-    );
-    const markedMap = new Map(records.map(r => [r.student_id, r.marked_at]));
-
-    // Build CSV
-    const dateStr = session.session_date.slice(0, 10);
-    const csvLines: string[] = [
-      // Header metadata (like the register form)
-      `"ATTENDANCE REGISTER"`,
-      `"Date:","${dateStr}"`,
-      `"Course:","${session.course_name}"`,
-      `"Session:","${session.title}"`,
-      ``,
-      // Column headers
-      `"No.","First Name","Last Name","Enrollment Number","Email","Department","Status","Time Marked"`,
-    ];
-
-    enrolled.forEach((s, idx) => {
-      const nameParts = s.name.trim().split(/\s+/);
-      const lastName = nameParts.length > 1 ? nameParts.pop()! : '';
-      const firstName = nameParts.join(' ');
-      const markedAt = markedMap.get(s.student_id);
-      const status = markedAt ? 'Present' : 'Absent';
-      const timeMarked = markedAt
-        ? new Date(markedAt).toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })
-        : '';
-      csvLines.push(
-        `"${idx + 1}","${firstName}","${lastName}","${s.enrollment_number}","${s.email}","${s.department ?? ''}","${status}","${timeMarked}"`
-      );
-    });
-
-    const csv = csvLines.join('\n');
-    const filename = `attendance_${dateStr}_${session.course_name.replace(/\s+/g, '_')}.csv`;
-
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send('\uFEFF' + csv); // BOM for Excel compatibility
-  } catch (err) { next(err); }
-}
-
-// ── Shared SELECT ─────────────────────────────────────────────────────────────
-
-const SESSION_SELECT = `
-  SELECT
-    s.*,
-    c.title AS course_name,
-    u.name  AS creator_name,
-    (SELECT COUNT(*) FROM user_course_codes ucc2 WHERE ucc2.course_code = (SELECT course_code FROM courses WHERE id = s.course_id)) AS total_students,
-    (SELECT COUNT(*) FROM attendance_records ar2 WHERE ar2.session_id = s.id) AS marked_count
-  FROM attendance_sessions s
-  JOIN courses c ON c.id = s.course_id
-  LEFT JOIN users u ON u.id = s.created_by
-`;

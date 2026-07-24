@@ -7,13 +7,13 @@ import {
   deleteStudent,
   importStudents,
 } from '../controllers/studentsController.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { authenticate, authorize, requireSuperAdmin } from '../middleware/auth.js';
 
 const router = Router();
 
-// All student routes require admin authentication
+// All student routes require an authenticated admin (super_admin or admin).
 router.use(authenticate);
-router.use(authorize('admin'));
+router.use(authorize('super_admin', 'admin'));
 
 // GET /students - Get all students with pagination/filtering
 router.get('/', getStudents);
@@ -30,8 +30,8 @@ router.post('/import', importStudents);
 // PUT /students/:id - Update student
 router.put('/:id', updateStudent);
 
-// DELETE /students/:id - Delete student
-router.delete('/:id', deleteStudent);
+// DELETE /students/:id - Hard delete (Super Admin only). Admins archive instead.
+router.delete('/:id', requireSuperAdmin, deleteStudent);
 
 export default router;
 

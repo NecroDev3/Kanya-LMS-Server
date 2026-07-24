@@ -9,18 +9,13 @@ import { fileURLToPath } from 'url';
 
 import authRoutes from './routes/auth.js';
 import studentsRoutes from './routes/students.js';
-import submissionsRoutes from './routes/submissions.js';
 import analyticsRoutes from './routes/analytics.js';
 import documentsRoutes from './routes/documents.js';
-import forumRoutes from './routes/forum.js';
 import coursesRoutes from './routes/courses.js';
-import messagesRoutes from './routes/messages.js';
-import profileRoutes from './routes/profile.js';
-import usersRoutes from './routes/users.js';
 import quizzesRoutes from './routes/quizzes.js';
-import invitesRoutes from './routes/invites.js';
-import announcementsRoutes from './routes/announcements.js';
 import attendanceRoutes from './routes/attendance.js';
+import progressReportsRoutes from './routes/progressReports.js';
+import adminsRoutes from './routes/admins.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
 dotenv.config();
@@ -155,26 +150,27 @@ app.get('/api/v1/health', (_req, res) => {
   sendHealthJson(res);
 });
 
-// API routes
+// API routes (admin-only model: every route below is behind authenticate + role checks)
 app.use('/api/v1/auth', authLimiter, authRoutes);
 app.use('/api/v1/students', apiLimiter, studentsRoutes);
-app.use('/api/v1/submissions', apiLimiter, submissionsRoutes);
 app.use('/api/v1/analytics', apiLimiter, analyticsRoutes);
 app.use('/api/v1/documents', apiLimiter, documentsRoutes);
-app.use('/api/v1/forum', apiLimiter, forumRoutes);
+app.use('/api/v1/programs', apiLimiter, coursesRoutes);
+// Back-compat alias while clients migrate from "courses" to "programs"
 app.use('/api/v1/courses', apiLimiter, coursesRoutes);
-app.use('/api/v1/messages', apiLimiter, messagesRoutes);
-app.use('/api/v1/profile', apiLimiter, profileRoutes);
-app.use('/api/v1/users', apiLimiter, usersRoutes);
 app.use('/api/v1/quizzes', apiLimiter, quizzesRoutes);
-app.use('/api/v1', apiLimiter, invitesRoutes);
-app.use('/api/v1/announcements', apiLimiter, announcementsRoutes);
-app.use('/api/v1/attendance',   apiLimiter, attendanceRoutes);
+app.use('/api/v1/questionnaires', apiLimiter, quizzesRoutes);
+app.use('/api/v1/attendance', apiLimiter, attendanceRoutes);
+app.use('/api/v1/progress-reports', apiLimiter, progressReportsRoutes);
+app.use('/api/v1/admins', apiLimiter, adminsRoutes);
 
-// Serve uploaded avatars (and other uploads) as static files
+// Ensure the local upload directory exists for the disk-storage fallback (used when
+// R2 is not configured). We deliberately do NOT serve it as public static content:
+// every file is delivered through an authenticated, program-scoped /download endpoint
+// (see documents/attendance/progress-reports controllers). Serving /uploads statically
+// would let anyone who guesses a path bypass those auth + RBAC checks.
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve(process.cwd(), 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-app.use('/uploads', express.static(UPLOAD_DIR));
 
 // Error handling
 app.use(notFoundHandler);

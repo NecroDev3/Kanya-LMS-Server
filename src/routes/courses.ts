@@ -5,23 +5,25 @@ import {
   createCourse,
   updateCourse,
   deleteCourse,
-  getCourseMembers,
-  addCourseMember,
-  removeCourseMember,
+  archiveCourse,
+  unarchiveCourse,
 } from '../controllers/coursesController.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { authenticate, authorize, requireSuperAdmin } from '../middleware/auth.js';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(authorize('super_admin', 'admin'));
 
+// Read: admins see only their program; super admins see all.
 router.get('/', getCourses);
-router.get('/:id/members', getCourseMembers);
-router.post('/:id/members', authorize('admin'), addCourseMember);
-router.delete('/:id/members/:userId', authorize('admin'), removeCourseMember);
 router.get('/:id', getCourse);
-router.post('/', authorize('admin'), createCourse);
-router.put('/:id', authorize('admin'), updateCourse);
-router.delete('/:id', authorize('admin'), deleteCourse);
+
+// Program lifecycle is Super Admin only.
+router.post('/', requireSuperAdmin, createCourse);
+router.put('/:id', requireSuperAdmin, updateCourse);
+router.post('/:id/archive', requireSuperAdmin, archiveCourse);
+router.post('/:id/unarchive', requireSuperAdmin, unarchiveCourse);
+router.delete('/:id', requireSuperAdmin, deleteCourse);
 
 export default router;

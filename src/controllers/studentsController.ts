@@ -3,17 +3,20 @@ import { v4 as uuidv4 } from 'uuid';
 import { query, queryOne, execute, sqlLike, sqlNow } from '../config/database.js';
 import { AuthRequest, Student, StudentResponse, ErrorCodes } from '../types/index.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { programFilter, assertProgramAccess, resolveWritableProgramId } from '../utils/programScope.js';
 
 // Helper to convert DB student to API response
 function toStudentResponse(student: Student): StudentResponse {
   return {
     id: student.id,
     userId: student.user_id,
+    programId: student.program_id ?? null,
     name: student.name,
     email: student.email,
     enrollmentNumber: student.enrollment_number,
     department: student.department,
     semester: student.semester,
+    status: student.status ?? 'active',
     createdAt: student.created_at as unknown as string,
     updatedAt: student.updated_at as unknown as string,
   };
@@ -32,6 +35,13 @@ export async function getStudents(req: AuthRequest, res: Response, next: NextFun
     let whereClause = '';
     const params: unknown[] = [];
     const conditions: string[] = [];
+
+    // Program scoping: admins only ever see their own program's roster.
+    const scope = programFilter(req, 'program_id');
+    if (scope.clause) {
+      conditions.push(scope.clause);
+      params.push(...scope.params);
+    }
 
     if (search) {
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
@@ -98,6 +108,9 @@ export async function getStudent(req: AuthRequest, res: Response, next: NextFunc
       throw new AppError('Student not found', 404, ErrorCodes.NOT_FOUND);
     }
 
+    // Direct-ID access outside an admin's program returns 403.
+    assertProgramAccess(req, student.program_id ?? null);
+
     res.json({
       success: true,
       data: toStudentResponse(student),
@@ -109,7 +122,9 @@ export async function getStudent(req: AuthRequest, res: Response, next: NextFunc
 
 export async function createStudent(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { name, email, enrollmentNumber, department, semester } = req.body;
+    const { name, email, enrollmentNumber, department, semester, programId } = req.body;
+    // Admins create within their own program; super admins must pass programId.
+    const targetProgramId = resolveWritableProgramId(req, programId);
 
     // Validation
     const errors: Array<{ field: string; message: string }> = [];
@@ -155,13 +170,12 @@ export async function createStudent(req: AuthRequest, res: Response, next: NextF
       throw new AppError('Validation failed', 400, ErrorCodes.DUPLICATE_ENTRY, errors);
     }
 
-    // Create student — also link user_id if a users row with that email already exists
+    // Create student scoped to the resolved program.
     const id = uuidv4();
-    const existingUser = await queryOne<{ id: string }>('SELECT id FROM users WHERE email = ?', [email.toLowerCase()]);
     await execute(
-      `INSERT INTO students (id, user_id, name, email, enrollment_number, department, semester)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, existingUser?.id ?? null, name.trim(), email.toLowerCase(), enrollmentNumber.trim(), department.trim(), semester]
+      `INSERT INTO students (id, program_id, name, email, enrollment_number, department, semester, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+      [id, targetProgramId, name.trim(), email.toLowerCase(), enrollmentNumber.trim(), department.trim(), semester]
     );
 
     const student = await queryOne<Student>('SELECT * FROM students WHERE id = ?', [id]);
@@ -182,7 +196,7 @@ export async function createStudent(req: AuthRequest, res: Response, next: NextF
 export async function updateStudent(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { id } = req.params;
-    const { name, email, enrollmentNumber, department, semester } = req.body;
+    const { name, email, enrollmentNumber, department, semester, status } = req.body;
 
     // Check if student exists
     const existing = await queryOne<Student>(
@@ -194,7 +208,14 @@ export async function updateStudent(req: AuthRequest, res: Response, next: NextF
       throw new AppError('Student not found', 404, ErrorCodes.NOT_FOUND);
     }
 
+    // Admins can only edit students within their own program.
+    assertProgramAccess(req, existing.program_id ?? null);
+
     const errors: Array<{ field: string; message: string }> = [];
+
+    if (status !== undefined && status !== 'active' && status !== 'archived') {
+      errors.push({ field: 'status', message: "status must be 'active' or 'archived'" });
+    }
 
     // Check for duplicate email if changing
     if (email && email.toLowerCase() !== existing.email) {
@@ -251,6 +272,10 @@ export async function updateStudent(req: AuthRequest, res: Response, next: NextF
       updates.push(`semester = ?`);
       params.push(semester);
     }
+    if (status !== undefined) {
+      updates.push(`status = ?`);
+      params.push(status);
+    }
 
     if (updates.length === 0) {
       res.json({
@@ -287,6 +312,7 @@ export async function updateStudent(req: AuthRequest, res: Response, next: NextF
 export async function importStudents(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const rows: Array<{ name: string; email: string; enrollmentNumber: string; department: string; semester: number }> = req.body.students;
+    const targetProgramId = resolveWritableProgramId(req, req.body.programId);
 
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new AppError('No student rows provided', 400, ErrorCodes.VALIDATION_ERROR);
@@ -322,11 +348,10 @@ export async function importStudents(req: AuthRequest, res: Response, next: Next
       }
 
       const id = uuidv4();
-      const existingUser = await queryOne<{ id: string }>('SELECT id FROM users WHERE email = ?', [emailLower]);
       await execute(
-        `INSERT INTO students (id, user_id, name, email, enrollment_number, department, semester)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, existingUser?.id ?? null, name.trim(), emailLower, enrollmentNumber.trim(), department.trim(), Number(semester)]
+        `INSERT INTO students (id, program_id, name, email, enrollment_number, department, semester, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+        [id, targetProgramId, name.trim(), emailLower, enrollmentNumber.trim(), department.trim(), Number(semester)]
       );
       results.push({ row: rowNum, status: 'created', name, email });
     }

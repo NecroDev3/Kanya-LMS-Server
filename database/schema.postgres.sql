@@ -1,31 +1,37 @@
 -- PostgreSQL schema for Kanya LMS (Neon, etc.)
 -- Run: DATABASE_URL=... npm run db:schema
 
+-- Admin-only access model: accounts are super admins or program-scoped admins.
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('student', 'admin')),
+  role TEXT NOT NULL CHECK (role IN ('super_admin', 'admin')),
   description TEXT,
-  clerk_user_id TEXT,
+  -- program a scoped admin manages (a courses.id). No inline FK: users is created before courses.
+  program_id TEXT,
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_clerk_user_id ON users(clerk_user_id) WHERE clerk_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_program ON users(program_id);
 
 CREATE TABLE IF NOT EXISTS students (
   id TEXT PRIMARY KEY,
   user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  program_id TEXT,
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   enrollment_number TEXT UNIQUE NOT NULL,
   department TEXT NOT NULL,
   semester INTEGER NOT NULL CHECK (semester >= 1 AND semester <= 8),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_students_program ON students(program_id);
 
 CREATE TABLE IF NOT EXISTS submissions (
   id TEXT PRIMARY KEY,
@@ -55,11 +61,13 @@ CREATE TABLE IF NOT EXISTS course_documents (
   file_path TEXT NOT NULL,
   file_mime_type TEXT,
   course_ids TEXT,
+  program_id TEXT,
   uploaded_by_id TEXT NOT NULL REFERENCES users(id),
   uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_documents_program ON course_documents(program_id);
 
 CREATE INDEX IF NOT EXISTS idx_students_department ON students(department);
 CREATE INDEX IF NOT EXISTS idx_students_semester ON students(semester);
@@ -74,9 +82,12 @@ CREATE TABLE IF NOT EXISTS courses (
   title TEXT NOT NULL,
   description TEXT,
   course_code TEXT UNIQUE NOT NULL,
-  sections TEXT NOT NULL DEFAULT '[]'
+  sections TEXT NOT NULL DEFAULT '[]',
+  archived INTEGER NOT NULL DEFAULT 0,
+  archived_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_courses_course_code ON courses(course_code);
+CREATE INDEX IF NOT EXISTS idx_courses_archived ON courses(archived);
 
 CREATE TABLE IF NOT EXISTS user_course_codes (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -215,25 +226,53 @@ CREATE TABLE IF NOT EXISTS conversation_reads (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_reads_user ON conversation_reads(user_id);
 
--- ── Attendance ───────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS attendance_sessions (
+-- ── Attendance Registers (admin uploads a signed in-person register for a date range) ──
+CREATE TABLE IF NOT EXISTS attendance_registers (
   id TEXT PRIMARY KEY,
-  course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  program_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
-  session_date DATE NOT NULL,
-  created_by TEXT REFERENCES users(id),
+  date_from DATE NOT NULL,
+  date_to DATE NOT NULL,
+  file_name TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_path TEXT NOT NULL,
+  file_mime_type TEXT,
+  uploaded_by_id TEXT NOT NULL REFERENCES users(id),
+  uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_attendance_sessions_course ON attendance_sessions(course_id);
-CREATE INDEX IF NOT EXISTS idx_attendance_sessions_date  ON attendance_sessions(session_date);
+CREATE INDEX IF NOT EXISTS idx_attendance_registers_program ON attendance_registers(program_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_registers_dates ON attendance_registers(date_from, date_to);
 
-CREATE TABLE IF NOT EXISTS attendance_records (
+-- ── Progress Reports (admin-uploaded program-level review write-ups for a month/year) ──
+CREATE TABLE IF NOT EXISTS progress_reports (
   id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
-  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  marked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE (session_id, student_id)
+  program_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT,
+  period_month INTEGER NOT NULL,
+  period_year INTEGER NOT NULL,
+  file_name TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_path TEXT NOT NULL,
+  file_mime_type TEXT,
+  uploaded_by_id TEXT NOT NULL REFERENCES users(id),
+  uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_attendance_records_session ON attendance_records(session_id);
-CREATE INDEX IF NOT EXISTS idx_attendance_records_student ON attendance_records(student_id);
+CREATE INDEX IF NOT EXISTS idx_progress_reports_program ON progress_reports(program_id);
+CREATE INDEX IF NOT EXISTS idx_progress_reports_period ON progress_reports(period_year, period_month);
+
+-- ── Questionnaire assignments (link a questionnaire/quiz to a specific student) ─
+CREATE TABLE IF NOT EXISTS questionnaire_assignments (
+  id TEXT PRIMARY KEY,
+  quiz_id TEXT NOT NULL REFERENCES quizzes(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  assigned_by_id TEXT REFERENCES users(id),
+  assigned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (quiz_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_questionnaire_assignments_quiz ON questionnaire_assignments(quiz_id);
+CREATE INDEX IF NOT EXISTS idx_questionnaire_assignments_student ON questionnaire_assignments(student_id);
